@@ -208,6 +208,25 @@
       return [...list.filter((x) => x !== old), { order: old ? old.order || null : null, ...s }];
     }
 
+    /**
+     * その日全体の流れを保存する（dayKeys は上から起きた順の key と "@:口座のid"）。
+     * その日に残高を確かめた口座それぞれの記録に、自分の位置を "@" にした並びを入れる（計算は口座ごと）。
+     */
+    setDayOrder(date, dayKeys) {
+      const checks = K.CheckOrder.checksOn(this.data, date);
+      if (!checks.length) return false;
+      let snaps = this.data.snapshots;
+      for (const c of checks) {
+        const s = snaps.find((x) => x.accountId === c.acc.id && x.date === date);
+        const order = K.CheckOrder.orderFor(dayKeys, c.acc.id);
+        snaps = s ? snaps.map((x) => (x === s ? { ...x, order } : x)) : [...snaps, { accountId: c.acc.id, date, amount: c.amount, order }];
+      }
+      const items = new Map(K.BudgetCalculator.occurrences(this.data, date, date).map((o) => [K.CheckOrder.key(o), o]));
+      const names = new Map(checks.map((c) => [K.CheckOrder.checkToken(c.acc.id), c.acc.name]));
+      const flow = dayKeys.map((k) => (names.has(k) ? `${names.get(k)}を確認` : items.has(k) ? items.get(k).name : null)).filter(Boolean).join('→');
+      return this.commit({ ...this.data, snapshots: snaps }, `${D.m(date)}/${D.d(date)}の流れを変更：${flow}`);
+    }
+
     /** 残高を確かめた順番を保存する（order は上から起きた順の key と "@"）。 */
     setCheckOrder(accountId, date, order) {
       const a = this.data.accounts.find((x) => x.id === accountId);

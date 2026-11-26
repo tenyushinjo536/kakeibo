@@ -161,6 +161,39 @@
       order.splice(order.indexOf(CHECK), 0, ...fresh);
       return order.map((k) => (k === CHECK ? { type: 'check' } : { type: 'item', occ: byKey.get(k) }));
     },
+
+    // ---- その日全体の流れ（画面用）。計算は口座ごとのまま ----
+    // 各口座の snapshot.order に、その日全体の並びを入れる：自分の確かめた位置は "@"、他の口座の確かめた位置は "@:口座のid"。
+    // 計算（afterKeys・afterSum）は自分の "@" より下の、自分の口座の出入りだけを見るので、他の項目が入っていても答えは変わらない。
+    checkToken: (accId) => `${CHECK}:${accId}`,
+    /** その日に残高を確かめた口座（残高の記録か、口座の時点がその日）と、確かめた残高。 */
+    checksOn(data, date) {
+      return data.accounts.map((a) => {
+        const s = this.snapshotOf(data, a.id, date);
+        if (s) return { acc: a, amount: s.amount };
+        return a.asOf === date ? { acc: a, amount: a.balance } : null;
+      }).filter(Boolean);
+    },
+    /** その日の流れ：[{type:'check', acc, amount} | {type:'item', occ}]。確かめた口座が無い日は空。 */
+    dayLayout(data, date) {
+      const checks = this.checksOn(data, date);
+      if (!checks.length) return [];
+      const items = BudgetCalculator.occurrences(data, date, date).sort((a, b) => BudgetCalculator.occOrder(a, b));
+      const byKey = new Map(items.map((o) => [this.key(o), o]));
+      const checkBy = new Map(checks.map((c) => [this.checkToken(c.acc.id), c]));
+      const saved = checks.map((c) => this.snapshotOf(data, c.acc.id, date)).find((s) => s && s.order);
+      const order = (saved ? saved.order.map((k) => (k === CHECK ? this.checkToken(saved.accountId) : k)) : [])
+        .filter((k) => byKey.has(k) || checkBy.has(k));
+      const known = new Set(order);
+      // 新しい出入りは、最初に確かめた位置の前に入れる（ふだんは「使ってから確かめる」ため）
+      const fresh = items.map((o) => this.key(o)).filter((k) => !known.has(k));
+      const firstCheck = order.findIndex((k) => checkBy.has(k));
+      order.splice(firstCheck < 0 ? order.length : firstCheck, 0, ...fresh);
+      for (const k of checkBy.keys()) if (!order.includes(k)) order.push(k);
+      return order.map((k) => (checkBy.has(k) ? { type: 'check', ...checkBy.get(k) } : { type: 'item', occ: byKey.get(k) }));
+    },
+    /** その日全体の並び（key と "@:口座"）を、ある口座の snapshot.order の形にする。 */
+    orderFor(dayKeys, accId) { const t = this.checkToken(accId); return dayKeys.map((k) => (k === t ? CHECK : k)); },
   };
 
   // ===================================================================

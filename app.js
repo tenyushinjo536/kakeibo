@@ -6,7 +6,7 @@
   'use strict';
   const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.21.0';
+  const APP_VERSION = '0.22.0';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -591,9 +591,10 @@
         const uc = card();
         s.unconfirmedBills.forEach((u, i) => {
           if (i > 0) uc.append(divider());
-          const ready = u.closing < t;
-          uc.append(row(`${md(u.date)}  ${u.card.name}`, '請求額の確定待ち', { rightColor: 'var(--sub)',
-            sub: ready ? `${md(u.closing)}締め・確定した請求額を入力すると、見通しに反映されます` : `${md(u.closing)}の締め日以降に請求額が確定します`,
+          // 確定するころかどうかは、過去に請求額を入れた日から内側で見積もる（確定日は画面に出さない）
+          const ready = CardLogic.likelyConfirmed(repo.data, u, t);
+          uc.append(row(`${md(u.date)}  ${u.card.name}`, ready ? '請求額を入力' : '請求額の確定待ち', { rightColor: ready ? 'var(--accent)' : 'var(--sub)',
+            sub: ready ? `${md(u.closing)}締め・請求額が確定しているころです。入力すると見通しに反映されます` : `${md(u.closing)}締め・請求額が確定したら入力してください`,
             onClick: () => bill(u.card, u.paymentRaw) }));
         });
         add(uc);
@@ -1610,13 +1611,50 @@
     const name = input('例：楽天カード', c ? c.name : '');
     const closing = numberInput('1〜31（31は月末）', c ? String(c.closingDay) : '');
     const payment = numberInput('1〜31', c ? String(c.paymentDay) : '');
-    const presets = [['楽天カード（月末締め・翌月27日）', 31, 27], ['エポス（27日締め・翌月27日）', 27, 27], ['エポス（4日締め・翌月4日）', 4, 4]];
-    body.append(label('よくある設定から選ぶ'), chipRow(presets.map(([l, cl, pa]) => chip(l, false, () => {
-      if (!name.value.trim()) name.value = l.split('（')[0];
-      closing.value = String(cl); payment.value = String(pa);
-    }))));
-    body.append(txt('締め日・支払日はカード会社の会員ページで確認してください。', 'note'));
-    body.append(label('名前'), name, label('締め日'), closing, label('支払日（締めの翌月）'), payment, label('引き落とし口座'), accountChips(accounts, () => accountId, (id) => { accountId = id; }));
+    const dayFields = div('', label('締め日'), closing, label('支払日（締めの翌月）'), payment);
+    const accountBox = div('', label('引き落とし口座'), accountChips(accounts, () => accountId, (id) => { accountId = id; }));
+    if (c) {
+      // 登録済みのカードは、そのまま直せる
+      body.append(label('名前'), name, dayFields, accountBox);
+    } else {
+      // 新しいカード：主なカードは一覧から選ぶだけ（締め日・支払日が入る）。一覧に無いカードだけ日付を入れる
+      let preset = null, pattern = null, editDays = false;
+      const stage = div('');
+      const uniqueName = (n) => { let x = n, i = 2; while (repo.cardNameTaken(x, null)) x = `${n} ${i++}`; return x; };
+      const pick = (p) => {
+        preset = p; editDays = false;
+        pattern = p && p.patterns.length === 1 ? p.patterns[0] : null;
+        name.value = p ? uniqueName(p.name) : '';
+        closing.value = pattern ? String(pattern.closingDay) : '';
+        payment.value = pattern ? String(pattern.paymentDay) : '';
+        draw();
+      };
+      const draw = () => {
+        stage.textContent = '';
+        if (preset === null) {
+          stage.append(label('どのカードですか？'),
+            div('card-grid', K.CardPresets.map((p) => h('button', { type: 'button', class: 'card-pick', onclick: () => pick(p) }, icon('card', 20), h('span', null, p.name))),
+              h('button', { type: 'button', class: 'card-pick other', onclick: () => pick(false) }, icon('plus', 20), h('span', null, '一覧にないカード'))));
+          return;
+        }
+        stage.append(div('picked', div('', div('t13 t-sub', preset ? '選んだカード' : '一覧にないカード'), div('t16 b', preset ? preset.name : '名前と日付を入れてください')),
+          btn('選び直す', 'text', () => pick(null))));
+        stage.append(label('名前（自分で分かる名前に変えられます）'), name);
+        if (preset && preset.patterns.length > 1) {
+          stage.append(label('締め日と支払日（カードによって2通りあります）'),
+            chipRow(preset.patterns.map((pt) => chip(K.patternLabel(pt), pt === pattern, () => {
+              pattern = pt; closing.value = String(pt.closingDay); payment.value = String(pt.paymentDay); draw();
+            })), 'col'));
+          stage.append(txt('どちらか分からないときは、カードの会員ページやアプリの「お支払い日」を見てください。', 'note'));
+        } else if (preset && !editDays) {
+          stage.append(div('picked-days', div('', div('t13 t-sub', '締め日と支払日'), div('t15 b', K.patternLabel(pattern))), btn('日付を直す', 'text', () => { editDays = true; draw(); })));
+        }
+        if (!preset || editDays) stage.append(dayFields);
+        stage.append(accountBox);
+      };
+      draw();
+      body.append(stage);
+    }
     if (c) body.append(txt('口座を変えると、これから引き落とされる請求だけが新しい口座になります。引き落とし済みの請求は元の口座のままです。', 'note'));
     let neutral = null;
     if (c && c.retired) neutral = ['また使う', () => { if (!repo.reviveCard(c.id)) toast('保存できませんでした'); render(); }];
@@ -1630,8 +1668,10 @@
     }, { danger: true })];
     openSheet({ title: c ? 'カードを編集' : 'カードを登録', body, neutral, onSave: () => {
       const n = name.value.trim(), cl = parseInt2(closing.value), pa = parseInt2(payment.value);
+      if (!c && !n && cl == null) { toast('カードを選んでください'); return false; }
       if (!n) { toast('名前を入力してください'); return false; }
       if (repo.cardNameTaken(n, c && c.id)) { toast('同じ名前のカードがあります'); return false; }
+      if (cl == null && pa == null) { toast('締め日と支払日を選ぶか、入力してください'); return false; }
       if (cl == null || cl < 1 || cl > 31) { toast('締め日を1〜31で入力してください'); return false; }
       if (pa == null || pa < 1 || pa > 31) { toast('支払日を1〜31で入力してください'); return false; }
       const okk = repo.upsertCard({ id: c ? c.id : newId(), name: n, closingDay: cl, paymentDay: pa, accountId, retired: c ? !!c.retired : false }, today());

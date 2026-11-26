@@ -497,7 +497,41 @@
     deleteBill(data, card, paymentRaw) {
       return { ...data, bills: data.bills.filter((b) => !(b.cardId === card.id && b.paymentDate === paymentRaw)) };
     },
+
+    /**
+     * 請求額が確定するまでの、締め日からの日数（画面には出さない。案内のタイミングにだけ使う）。
+     * そのカードで過去に請求額を入れた日（入力日）が、締め日の何日後だったかの中央値。記録が無ければ7日。
+     */
+    confirmLag(data, card) {
+      const lags = data.bills.filter((b) => b.cardId === card.id)
+        .map((b) => D.between(this.closingFor(card, b.paymentDate), b.inputDate)).filter((n) => n >= 1 && n <= 40).sort((a, b) => a - b);
+      return lags.length ? lags[Math.floor((lags.length - 1) / 2)] : 7;
+    },
+    /** 請求額が確定しているころか（締め日＋確定までの日数を過ぎた）。 */
+    likelyConfirmed(data, u, today) { return D.plusDays(u.closing, this.confirmLag(data, u.card)) <= today; },
   };
+
+  /**
+   * よく使われるカードの締め日・支払日（2026-11 に各社の公式ページ・公式の案内で確認。31＝月末）。
+   * 同じカードで何通りかあるものは patterns に並べる。会員ごとに違うカード（アメックス）や、
+   * 締めた月のうちに払うカード（ライフカード）は入れない（「その他のカード」で登録してもらう）。
+   */
+  const CardPresets = [
+    { name: '楽天カード', patterns: [[31, 27]] },
+    { name: '三井住友カード', patterns: [[15, 10], [31, 26]] },
+    { name: 'JCBカード', patterns: [[15, 10]] },
+    { name: '三菱UFJカード', patterns: [[15, 10]] },
+    { name: 'PayPayカード', patterns: [[31, 27]] },
+    { name: 'dカード', patterns: [[15, 10]] },
+    { name: 'イオンカード', patterns: [[10, 2]] },
+    { name: 'エポスカード', patterns: [[27, 27], [4, 4]] },
+    { name: 'セゾンカード', patterns: [[10, 4]] },
+    { name: 'au PAYカード', patterns: [[15, 10], [10, 4]] },
+    { name: 'Amazon Mastercard', patterns: [[31, 26]] },
+    { name: 'ビューカード', patterns: [[5, 4]] },
+    { name: 'オリコカード', patterns: [[31, 27]] },
+  ].map((p) => ({ ...p, patterns: p.patterns.map(([closingDay, paymentDay]) => ({ closingDay, paymentDay })) }));
+  const patternLabel = (p) => `${p.closingDay >= 31 ? '月末' : p.closingDay + '日'}締め・翌月${p.paymentDay}日払い`;
 
   // ===================================================================
   // 月ごとの収支（前月繰越 ＋ 収入 − 出金 ＝ 月末の残高）
@@ -672,5 +706,5 @@
   };
 
   Object.assign(K, { D, YM, INCOME, EXPENSE, sum, cmpStr, groupBy, noBankDays, isPrepaid, kindLabel,
-    CHECK, CheckOrder, JapaneseHolidays, BudgetCalculator, CardLogic, MonthlyLogic, BreakdownLogic });
+    CHECK, CheckOrder, CardPresets, patternLabel, JapaneseHolidays, BudgetCalculator, CardLogic, MonthlyLogic, BreakdownLogic });
 })(window.K = window.K || {});

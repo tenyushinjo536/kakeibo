@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>家計簿</title>
+<meta name="description" content="確定したお金の出入りだけを入れて、月末の残高と引き落とし口座の不足を出す家計簿。データはこの端末の中だけに保存します。">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="家計簿">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#2B2C30" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="app"><div id="content"></div></main>
+<nav id="tabbar" aria-label="画面の切り替え"><div class="inner"></div></nav>
+<div id="layer"></div>
+<noscript><p style="padding:24px">このアプリを使うには JavaScript を有効にしてください。</p></noscript>
+<script src="domain.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

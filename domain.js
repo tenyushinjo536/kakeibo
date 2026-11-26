@@ -49,6 +49,14 @@
   };
 
   const INCOME = 'INCOME', EXPENSE = 'EXPENSE';
+  /** 繰り返しの間隔（か月）。版9までのデータは毎月（1）。 */
+  const repeatEvery = (e) => (e.repeatEvery >= 1 ? e.repeatEvery : 1);
+  /** 繰り返しの間隔の選択肢と、その呼び方。 */
+  const REPEAT_CHOICES = [1, 2, 3, 6, 12];
+  const everyLabel = (n) => (n === 1 ? '毎月' : n === 12 ? '毎年' : n === 6 ? '半年ごと' : `${n}か月ごと`);
+  /** 「毎月27日」「毎年3月27日」「2か月ごと・27日」 */
+  const repeatLabel = (e) => { const n = repeatEvery(e), d = +e.date.slice(8, 10), m = +e.date.slice(5, 7);
+    return n === 1 ? `毎月${d}日` : n === 12 ? `毎年${m}月${d}日` : `${everyLabel(n)}・${d}日`; };
   const sum = (arr, f) => arr.reduce((a, x) => a + (f ? f(x) : x), 0);
   const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   const groupBy = (arr, key) => {
@@ -224,12 +232,13 @@
     rawDates(e, to) {
       if (!e.repeatMonthly) return [e.date];
       const out = [];
+      const step = repeatEvery(e);   // 何か月ごとか（1＝毎月、12＝毎年）
       let ym = D.ym(e.date);
       const last = D.ym(D.plusDays(to, 7));
       while (ym <= last) {
         const d = this.sameDayInMonth(e.date, ym);
         if (d >= e.date && (e.endDate == null || d <= e.endDate)) out.push(d);
-        ym = YM.plus(ym, 1);
+        ym = YM.plus(ym, step);
       }
       return out;
     },
@@ -372,8 +381,10 @@
       transfers.sort((a, b) => cmpStr(a.deadline, b.deadline));
 
       const thisMonth = D.ym(today);
+      // 今月の定期の支払い（毎月のもの＋今月に回が来る、毎月以外のもの）
       const monthlyFixed = sum(data.entries.filter((e) => e.kind === EXPENSE && e.repeatMonthly &&
-        D.ym(e.date) <= thisMonth && (e.endDate == null || D.ym(e.endDate) >= thisMonth)), (e) => e.amount);
+        D.ym(e.date) <= thisMonth && (e.endDate == null || D.ym(e.endDate) >= thisMonth) &&
+        (repeatEvery(e) === 1 || this.expand(e, YM.atDay(thisMonth, 1), YM.atEnd(thisMonth), true).length > 0)), (e) => e.amount);
 
       return {
         totalBalance: start, currentByAccount: current, recordedBalance: recorded, passedSinceUpdate: passed,
@@ -530,8 +541,13 @@
     { name: 'Amazon Mastercard', patterns: [[31, 26]] },
     { name: 'ビューカード', patterns: [[5, 4]] },
     { name: 'オリコカード', patterns: [[31, 27]] },
-  ].map((p) => ({ ...p, patterns: p.patterns.map(([closingDay, paymentDay]) => ({ closingDay, paymentDay })) }));
-  const patternLabel = (p) => `${p.closingDay >= 31 ? '月末' : p.closingDay + '日'}締め・翌月${p.paymentDay}日払い`;
+    // 後払い（締めて後で払う仕組みはカードと同じ）。2026-11 に公式・解説記事で確認
+    { name: 'ペイディ', later: true, patterns: [[31, 27]] },
+    { name: 'メルペイのスマート払い', later: true, patterns: [[31, 6], [31, 11], [31, 16], [31, 21], [31, 26], [31, 31]] },
+    { name: 'atone（翌月払い）', later: true, patterns: [[31, 10], [31, 20], [31, 27]] },
+    { name: 'ポチっとチャージ（バンドルカード）', later: true, patterns: [[31, 31]] },
+  ].map((p) => ({ later: false, ...p, patterns: p.patterns.map(([closingDay, paymentDay]) => ({ closingDay, paymentDay })) }));
+  const patternLabel = (p) => `${p.closingDay >= 31 ? '月末' : p.closingDay + '日'}締め・翌月${p.paymentDay >= 31 ? '末日' : p.paymentDay + '日'}払い`;
 
   // ===================================================================
   // 月ごとの収支（前月繰越 ＋ 収入 − 出金 ＝ 月末の残高）
@@ -648,7 +664,7 @@
       const groups = groupBy(expenses, (o) => {
         if (o.entryId.startsWith('bill:')) { const c = cardById.get(o.entryId.split(':')[1]); return 'カード：' + (c ? c.name : '（削除したカード）'); }
         const e = entryById.get(o.entryId);
-        return e && e.repeatMonthly ? '毎月の引き落とし' : '1回限りの引き落とし';
+        return e && e.repeatMonthly ? '定期の引き落とし' : '1回限りの引き落とし';
       });
       const expenseItems = [...groups].map(([label, l]) => {
         const charged = sum(l.filter((o) => o.entryId.startsWith('bill:')), (o) => this.chargesInBill(data, o));
@@ -706,5 +722,5 @@
   };
 
   Object.assign(K, { D, YM, INCOME, EXPENSE, sum, cmpStr, groupBy, noBankDays, isPrepaid, kindLabel,
-    CHECK, CheckOrder, CardPresets, patternLabel, JapaneseHolidays, BudgetCalculator, CardLogic, MonthlyLogic, BreakdownLogic });
+    CHECK, CheckOrder, CardPresets, patternLabel, repeatEvery, REPEAT_CHOICES, everyLabel, repeatLabel, JapaneseHolidays, BudgetCalculator, CardLogic, MonthlyLogic, BreakdownLogic });
 })(window.K = window.K || {});

@@ -22,8 +22,8 @@
   // ===================================================================
   const KEY = 'kakeibo.budget';
   const BudgetStore = {
-    /** 1〜3=Android v0.1〜0.4、4=確定だけ、5=残高の記録、6=電子マネー、7=この回だけの変更、8=請求ごとの口座・使わないカード、9=残高を確かめた順番。 */
-    VERSION: 9,
+    /** 1〜3=Android v0.1〜0.4、4=確定だけ、5=残高の記録、6=電子マネー、7=この回だけの変更、8=請求ごとの口座・使わないカード、9=残高を確かめた順番、10=毎月以外の繰り返し（repeatEvery）。 */
+    VERSION: 10,
     storage: (() => { try { return window.localStorage; } catch (e) { return null; } })(),
 
     load(today) {
@@ -67,7 +67,7 @@
         accounts: d.accounts.map((a) => ({ id: a.id, name: a.name, balance: a.balance, asOf: a.asOf,
           isDebit: !!a.isDebit, isSalary: !!a.isSalary, isCash: !!a.isCash, isEmoney: !!a.isEmoney, isIc: !!a.isIc })),
         entries: d.entries.map((e) => ({ id: e.id, name: e.name, amount: e.amount, date: e.date, kind: e.kind,
-          accountId: e.accountId, repeatMonthly: !!e.repeatMonthly, endDate: e.endDate ?? null, lastAmount: e.lastAmount ?? null,
+          accountId: e.accountId, repeatMonthly: !!e.repeatMonthly, repeatEvery: K.repeatEvery(e), endDate: e.endDate ?? null, lastAmount: e.lastAmount ?? null,
           chargeFrom: e.chargeFrom ?? null,
           changes: (e.changes || []).map((c) => ({ originalDate: c.originalDate, date: c.date ?? null, amount: c.amount ?? null, skipped: !!c.skipped })) })),
         cards: d.cards.map((c) => ({ id: c.id, name: c.name, closingDay: c.closingDay, paymentDay: c.paymentDay, accountId: c.accountId, retired: !!c.retired })),
@@ -98,6 +98,8 @@
         if (o.kind !== INCOME && o.kind !== EXPENSE) throw new Error(`区分「${o.kind}」が読めません`);
         return { id: str(o, 'id'), name: str(o, 'name'), amount: num(o, 'amount'), date: date(o, 'date'), kind: o.kind,
           accountId: str(o, 'accountId'), repeatMonthly: !!o.repeatMonthly, endDate: dateOrNull(o, 'endDate'), lastAmount: numOrNull(o, 'lastAmount'),
+          // 版9までは無い（毎月）
+          repeatEvery: Number.isInteger(o.repeatEvery) && o.repeatEvery >= 1 && o.repeatEvery <= 24 ? o.repeatEvery : 1,
           chargeFrom: o.chargeFrom == null ? null : str(o, 'chargeFrom'),
           changes: (Array.isArray(o.changes) ? o.changes : []).map((c) => ({ originalDate: date(c, 'originalDate'), date: dateOrNull(c, 'date'), amount: numOrNull(c, 'amount'), skipped: !!c.skipped })) };
       });
@@ -426,7 +428,7 @@
       for (const e of data.entries.slice().sort((a, b) => K.cmpStr(a.date, b.date))) {
         let kindText = e.kind === INCOME ? '入金' : '出金';
         if (e.chargeFrom) kindText = 'チャージ：' + (e.chargeFrom.startsWith('card:') ? cardName.get(e.chargeFrom.slice(5)) : accName.get(e.chargeFrom.slice(4)));
-        rec('予定', { 名前: e.name, 区分: kindText, 金額: e.amount, 日付: e.date, 口座: accName.get(e.accountId), 繰り返し: e.repeatMonthly ? '毎月' : 'なし',
+        rec('予定', { 名前: e.name, 区分: kindText, 金額: e.amount, 日付: e.date, 口座: accName.get(e.accountId), 繰り返し: e.repeatMonthly ? K.everyLabel(K.repeatEvery(e)) : 'なし',
           最終日: e.endDate, 最終回の金額: e.lastAmount });
         if (e.repeatMonthly) for (const c of e.changes || []) {
           rec('変更', { 名前: e.name, 区分: c.skipped ? '飛ばす' : 'この回だけ', 金額: c.amount, 日付: c.date, 元の日付: c.originalDate });
@@ -535,14 +537,17 @@
           if (amount <= 0) throw new Bad(line, '「金額」は1円以上にしてください');
           const start = date(line, r, '日付');
           const rp = get(r, '繰り返し');
-          if (!['毎月', '', 'なし'].includes(rp)) throw new Bad(line, '「繰り返し」は「毎月」か「なし」にしてください');
-          const repeat = rp === '毎月';
+          // 毎月・2か月ごと・3か月ごと・半年ごと・毎年・Nか月ごと
+          const m = rp.match(/^(\d+)か月ごと$/);
+          const every = rp === '毎月' ? 1 : rp === '毎年' ? 12 : rp === '半年ごと' ? 6 : m ? parseInt(m[1], 10) : ['', 'なし'].includes(rp) ? 0 : -1;
+          if (every < 0 || every > 24) throw new Bad(line, '「繰り返し」は「なし」「毎月」「2か月ごと」「半年ごと」「毎年」などにしてください');
+          const repeat = every > 0;
           const end = repeat ? date(line, r, '最終日', false) : null;
           if (end != null && end < start) throw new Bad(line, '「最終日」が「日付」より前です');
           const last = repeat && end != null ? long(line, r, '最終回の金額', false) : null;
           if (last != null && last <= 0) throw new Bad(line, '「最終回の金額」は1円以上にしてください');
           return [line, { id: newId(), name: text_(line, r, '名前'), amount, date: start, kind, accountId: accRef(line, r), repeatMonthly: repeat,
-            endDate: end, lastAmount: last, chargeFrom, changes: [] }];
+            repeatEvery: repeat ? every : 1, endDate: end, lastAmount: last, chargeFrom, changes: [] }];
         });
         const changesByIdx = new Map();
         for (const [line, r] of of('変更')) {
@@ -552,7 +557,7 @@
           const target = entryRows[idx][1];
           const n = text_(line, r, '名前');
           if (n !== target.name) throw new Bad(line, `「変更」の名前「${n}」が、すぐ上の予定「${target.name}」と違います`);
-          if (!target.repeatMonthly) throw new Bad(line, '「変更」は毎月の予定にだけ付けられます');
+          if (!target.repeatMonthly) throw new Bad(line, '「変更」は繰り返しの予定にだけ付けられます');
           const orig = date(line, r, '元の日付');
           let c;
           const k = get(r, '区分');

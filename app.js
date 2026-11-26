@@ -6,7 +6,7 @@
   'use strict';
   const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.22.0';
+  const APP_VERSION = '0.23.0';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -729,11 +729,11 @@
         s3.loans.length ? h('div', { style: 'flex:1;padding-left:16px' }, txt('返済残高', 't13 t-sub'), money(sum(s3.loans, (l) => l.remainingTotal), 22)) : null));
       for (const l of s3.loans) {
         const entry = repo.data.entries.find((e) => e.id === l.entryId);
-        const totalCount = entry && entry.endDate ? monthsBetween(entry.date, entry.endDate) + 1 : l.remainingCount;
+        const totalCount = entry && entry.endDate ? Math.floor(monthsBetween(entry.date, entry.endDate) / K.repeatEvery(entry)) + 1 : l.remainingCount;
         const paid = Math.max(0, totalCount - l.remainingCount);
         const ratio = totalCount > 0 ? paid / totalCount : 0;
         lc.append(h('div', { style: 'height:14px' }));
-        lc.append(row(l.name, `月 ${yen(l.monthly)}`, { sub: `返済済み ${paid}/${totalCount}回（${Math.floor(ratio * 100)}%）・最終回 ${ymd(l.lastDate)}`, onClick: () => entry && editEntry(entry, entry.kind) }));
+        lc.append(row(l.name, `${entry && K.repeatEvery(entry) !== 1 ? '1回' : '月'} ${yen(l.monthly)}`, { sub: `返済済み ${paid}/${totalCount}回（${Math.floor(ratio * 100)}%）・最終回 ${ymd(l.lastDate)}`, onClick: () => entry && editEntry(entry, entry.kind) }));
         lc.append(meter(ratio, `${l.name} 返済済み ${Math.floor(ratio * 100)}%`));
       }
       add(lc);
@@ -871,18 +871,18 @@
     const recurring = data.entries.filter((e) => e.repeatMonthly);
     const upcoming = data.entries.filter((e) => !e.repeatMonthly && e.date >= t).sort((a, b) => K.cmpStr(a.date, b.date));
     const past = data.entries.filter((e) => !e.repeatMonthly && e.date < t).sort((a, b) => K.cmpStr(b.date, a.date));
-    add(header('毎月の定期予定', '＋追加', () => editEntry(null, EXPENSE)));
+    add(header('定期の予定', '＋追加', () => editEntry(null, EXPENSE)));
     const rc = card();
-    if (!recurring.length) rc.append(txt('奨学金・家賃・給与など、毎月同じ日に発生する入出金を登録すると、見通しに自動で反映されます。', 't14 t-sub'));
+    if (!recurring.length) rc.append(txt('家賃・給与・奨学金（毎月）や、自動車税・保険の年払い（毎年）など、決まった間隔の入出金を登録すると、見通しに自動で反映されます。', 't14 t-sub'));
     const loans = new Map(s.loans.map((l) => [l.entryId, l]));
-    recurring.slice().sort((a, b) => D.d(a.date) - D.d(b.date)).forEach((e, i) => {
+    recurring.slice().sort((a, b) => K.repeatEvery(a) - K.repeatEvery(b) || D.d(a.date) - D.d(b.date)).forEach((e, i) => {
       if (i > 0) rc.append(divider());
       const acc = data.accounts.find((a) => a.id === e.accountId);
-      const next = BC.expand(e, D.plusDays(t, 1), D.plusMonths(t, 2), !!(acc && noBankDays(acc)))[0];
+      const next = BC.expand(e, D.plusDays(t, 1), D.plusMonths(t, 13), !!(acc && noBankDays(acc)))[0];
       const left = loans.has(e.id) ? `・残り${loans.get(e.id).remainingCount}回` : e.endDate == null ? '' : '・終了';
       const inc = e.kind === INCOME;
       rc.append(row(e.name, (inc ? '＋' : '−') + yen(e.amount), { rightColor: inc ? 'var(--income)' : 'var(--text)',
-        sub: `毎月${D.d(e.date)}日` + (next ? `・次回 ${md(next.date)}` : '') + left + `・${accName(e.accountId)}`, onClick: () => editEntry(e, e.kind) }));
+        sub: K.repeatLabel(e) + (next ? `・次回 ${md(next.date)}` : '') + left + `・${accName(e.accountId)}`, onClick: () => editEntry(e, e.kind) }));
     });
     add(rc);
 
@@ -1604,8 +1604,9 @@
   }
 
   function editCard(c) {
-    const accounts = repo.data.accounts.filter((a) => !noBankDays(a));
-    if (!accounts.length) { toast('先に引き落とし口座を登録してください'); return; }
+    // 払い先：銀行を先に。後払いをコンビニなどで払う人のために、現金なども選べる
+    const accounts = [...repo.data.accounts.filter((a) => !noBankDays(a)), ...repo.data.accounts.filter((a) => noBankDays(a))];
+    if (!accounts.length) { toast('先に口座を登録してください'); return; }
     let accountId = c ? c.accountId : (accounts.find((a) => a.isDebit) || accounts[0]).id;
     const body = div('form');
     const name = input('例：楽天カード', c ? c.name : '');
@@ -1632,16 +1633,18 @@
       const draw = () => {
         stage.textContent = '';
         if (preset === null) {
-          stage.append(label('どのカードですか？'),
-            div('card-grid', K.CardPresets.map((p) => h('button', { type: 'button', class: 'card-pick', onclick: () => pick(p) }, icon('card', 20), h('span', null, p.name))),
-              h('button', { type: 'button', class: 'card-pick other', onclick: () => pick(false) }, icon('plus', 20), h('span', null, '一覧にないカード'))));
+          const grid = (list) => div('card-grid', list.map((p) => h('button', { type: 'button', class: 'card-pick', onclick: () => pick(p) }, icon('card', 20), h('span', null, p.name))));
+          stage.append(label('クレジットカード'), grid(K.CardPresets.filter((p) => !p.later)),
+            label('後払い（締めて、翌月にまとめて払うもの）'), grid(K.CardPresets.filter((p) => p.later)),
+            div('card-grid', h('button', { type: 'button', class: 'card-pick other', onclick: () => pick(false) }, icon('plus', 20), h('span', null, '一覧にないカード・後払い'))),
+            txt('バンドルカードなどチャージして使うものは、「口座」の置き場所に電子マネーとして登録してください。ポチっとチャージ（後払い）は上の一覧から選べます。', 'note'));
           return;
         }
         stage.append(div('picked', div('', div('t13 t-sub', preset ? '選んだカード' : '一覧にないカード'), div('t16 b', preset ? preset.name : '名前と日付を入れてください')),
           btn('選び直す', 'text', () => pick(null))));
         stage.append(label('名前（自分で分かる名前に変えられます）'), name);
         if (preset && preset.patterns.length > 1) {
-          stage.append(label('締め日と支払日（カードによって2通りあります）'),
+          stage.append(label(preset.later ? '締め日と支払日（支払い方法や自分で決めた日で変わります）' : '締め日と支払日（カードによって2通りあります）'),
             chipRow(preset.patterns.map((pt) => chip(K.patternLabel(pt), pt === pattern, () => {
               pattern = pt; closing.value = String(pt.closingDay); payment.value = String(pt.paymentDay); draw();
             })), 'col'));
@@ -1680,56 +1683,68 @@
     } });
   }
 
-  /** 「毎月繰り返す」と、オンのときだけ出る詳細（回数・最終回の日付・最終回の金額）。 */
+  /** 「繰り返す」と、オンのときだけ出る詳細（間隔・回数・最終回の日付・最終回の金額）。 */
   function repeatSection(dateField, e, defaultOn) {
-    const rep = toggle('毎月繰り返す', e ? e.repeatMonthly : defaultOn);
+    const rep = toggle('繰り返す', e ? e.repeatMonthly : defaultOn);
+    let every = e ? K.repeatEvery(e) : 1;
     const box = div('');
+    const everyRow = div('');
     const count = numberInput('空欄の場合は無期限');
     const endField = dateInput(e && e.endDate);
     const lastAmount = numberInput('通常と同じなら空欄', e && e.lastAmount != null ? String(e.lastAmount) : '');
     const preview = div('field-note');
+    const hint = txt('', 't12 t-sub');
     const clearEnd = btn('最終回の日付を消す', 'text', () => { endField.value = ''; onEnd(); });
-    box.append(txt('毎月、開始日と同じ日に繰り返します。', 't12 t-sub'), label('繰り返す回数（開始日を含む）'), count,
+    // 回数⇔最終回：間隔を入れて数える（2か月ごとなら、2か月で1回）
+    const nth = (start, n) => BC.sameDayInMonth(start, YM.plus(D.ym(start), (n - 1) * every));
+    const countOf = (start, end) => Math.floor(monthsBetween(start, end) / every) + 1;
+    const drawEvery = () => {
+      everyRow.textContent = '';
+      everyRow.append(chipRow(K.REPEAT_CHOICES.map((n) => chip(K.everyLabel(n), n === every, () => { every = n; drawEvery(); onCount(); })), 'wrap'));
+      const d = D.valid(dateField.value) ? dateField.value : null;
+      hint.textContent = !d ? '' : every === 1 ? `毎月${D.d(d)}日に繰り返します。` : every === 12 ? `毎年${D.m(d)}月${D.d(d)}日に繰り返します（自動車税・保険の年払いなど）。` : `${K.everyLabel(every)}、${D.d(d)}日に繰り返します（開始日の月から数えます）。`;
+    };
+    box.append(label('間隔'), everyRow, hint, label('繰り返す回数（開始日を含む）'), count,
       label('または、最終回の日付'), endField, clearEnd, label('最終回の金額（異なる場合のみ）'), lastAmount, preview);
     const updatePreview = () => {
       const start = dateField.value, end = endField.value;
-      preview.textContent = !D.valid(start) ? '' : !D.valid(end) ? '最終回：なし（無期限）' : end < start ? '⚠ 最終回が開始日より前です' : `最終回：${ymd(end)}（全${monthsBetween(start, end) + 1}回）`;
+      preview.textContent = !D.valid(start) ? '' : !D.valid(end) ? '最終回：なし（無期限）' : end < start ? '⚠ 最終回が開始日より前です' : `最終回：${ymd(end)}（全${countOf(start, end)}回）`;
     };
-    // 回数を入れたら最後の日を、最後の日を入れたら回数を計算する
+    function onCount() {
+      const start = dateField.value, n = parseInt2(count.value);
+      if (D.valid(start) && n && n > 0) endField.value = nth(start, n);
+      updatePreview();
+    }
     count.addEventListener('input', () => {
       const start = dateField.value, n = parseInt2(count.value);
       if (!D.valid(start)) return;
-      endField.value = n && n > 0 ? nthDate(start, n) : '';
+      endField.value = n && n > 0 ? nth(start, n) : '';
       updatePreview();
     });
     function onEnd() {
       const start = dateField.value, end = endField.value;
-      count.value = D.valid(start) && D.valid(end) && end >= start ? String(monthsBetween(start, end) + 1) : '';
+      count.value = D.valid(start) && D.valid(end) && end >= start ? String(countOf(start, end)) : '';
       updatePreview();
     }
     endField.addEventListener('change', onEnd);
     endField.addEventListener('input', onEnd);
-    const onStart = () => {
-      const start = dateField.value, n = parseInt2(count.value);
-      if (D.valid(start) && n && n > 0) endField.value = nthDate(start, n);
-      updatePreview();
-    };
+    const onStart = () => { onCount(); drawEvery(); };
     dateField.addEventListener('change', onStart);
     dateField.addEventListener('input', onStart);
-    if (e && e.endDate) count.value = String(monthsBetween(e.date, e.endDate) + 1);
+    if (e && e.endDate) count.value = String(countOf(e.date, e.endDate));
     const show = () => { box.style.display = rep.input.checked ? '' : 'none'; };
     rep.input.addEventListener('change', show);
-    show(); updatePreview();
+    drawEvery(); show(); updatePreview();
     return {
       el: div('', rep.el, box),
       apply(base) {
-        if (!rep.input.checked) return { ...base, repeatMonthly: false, endDate: null, lastAmount: null };
+        if (!rep.input.checked) return { ...base, repeatMonthly: false, repeatEvery: 1, endDate: null, lastAmount: null };
         const end = endField.value || null;
         const lt = lastAmount.value.trim(), last = parseYen(lt);
         if (end && !D.valid(end)) { toast('最終回の日付を選び直してください'); return null; }
         if (end && end < base.date) { toast('最終回が開始日より前です'); return null; }
         if (lt && (last == null || last <= 0)) { toast('最終回の金額を数字で入力してください'); return null; }
-        return { ...base, repeatMonthly: true, endDate: end, lastAmount: end ? last : null };
+        return { ...base, repeatMonthly: true, repeatEvery: every, endDate: end, lastAmount: end ? last : null };
       },
     };
   }

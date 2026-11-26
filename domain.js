@@ -478,10 +478,11 @@
         if (!b.accountId) continue;
         const card = data.cards.find((c) => c.id === b.cardId);
         const name = card ? card.name : '削除したカード';
-        const d = this.payDay(b.paymentDate);
+        // 引き落とせず別の日に払う請求は、その日（payOn）に払う
+        const d = b.payOn || this.payDay(b.paymentDate);
         if (d < from || d > to) continue;
         out.push({ entryId: `bill:${b.cardId}:${b.paymentDate}`, name: name + 'の請求', amount: b.amount, date: d,
-          originalDate: b.paymentDate, kind: EXPENSE, accountId: b.accountId, changed: false });
+          originalDate: b.paymentDate, kind: EXPENSE, accountId: b.accountId, changed: false, late: !!b.payOn });
       }
       return out;
     },
@@ -501,9 +502,11 @@
           .map((p) => ({ card, paymentRaw: p, date: this.payDay(p), closing: this.closingFor(card, p) })))
         .sort((a, b) => cmpStr(a.date, b.date));
     },
-    setBill(data, card, paymentRaw, amount, today, id) {
+    /** 請求を確定する（同じカード・同じ支払日の確定は置き換える）。payOn＝引き落とせず別の日に払う日（無ければ null）。 */
+    setBill(data, card, paymentRaw, amount, today, id, payOn = null) {
+      const old = this.confirmedBill(data, card, paymentRaw);
       return { ...data, bills: [...data.bills.filter((b) => !(b.cardId === card.id && b.paymentDate === paymentRaw)),
-        { id, cardId: card.id, paymentDate: paymentRaw, amount, inputDate: today, accountId: card.accountId }] };
+        { id, cardId: card.id, paymentDate: paymentRaw, amount, inputDate: old ? old.inputDate : today, accountId: old ? old.accountId : card.accountId, payOn: payOn || null }] };
     },
     deleteBill(data, card, paymentRaw) {
       return { ...data, bills: data.bills.filter((b) => !(b.cardId === card.id && b.paymentDate === paymentRaw)) };
@@ -605,6 +608,7 @@
 
     /** 休日で日付がずれた理由。ずれていなければ null。 */
     shiftReason(o) {
+      if (o.late) return '引き落とせず、この日に払う';
       if (o.changed) return this.changeLabel(o);
       if (o.date === o.originalDate) return null;
       const d = o.originalDate;

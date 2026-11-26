@@ -6,7 +6,7 @@
   'use strict';
   const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.23.0';
+  const APP_VERSION = '0.24.0';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -1366,6 +1366,15 @@
     const cardRow = div(''), payRow = div(''), info = txt('', 't13', 'padding-top:8px');
     const amount = amountField((CardLogic.confirmedBill(data, cd, raw) || {}).amount);
     const payLabel = label('');
+    // 引き落とせなかった（残高不足など）：別の日に払う。確定した請求があるときだけ出す
+    const failBox = div('');
+    const failToggle = toggle('引き落とせなかった（別の日に払う）', false);
+    const failDate = dateInput(t);
+    const failFields = div('', label('実際に払う日（再引き落とし・振込など）'), failDate,
+      txt('遅延損害金などで増えたときは、上の請求額を実際に払う額にしてください。', 'note'));
+    const showFail = () => { failFields.style.display = failToggle.input.checked ? '' : 'none'; };
+    failToggle.input.addEventListener('change', showFail);
+    failBox.append(failToggle.el, failFields);
     const rebuild = () => {
       cardRow.textContent = '';
       if (cards.length > 1) cardRow.append(chipRow(cards.map((x) => chip(x.name, x.id === cd.id, () => { cd = x; raw = firstUnconfirmed(x); amount.value = (CardLogic.confirmedBill(data, cd, raw) || {}).amount ?? ''; rebuild(); }))));
@@ -1384,11 +1393,16 @@
         (prev ? `\n前回の請求額：${md(CardLogic.payDay(prev.paymentDate))} ${yen(prev.amount)}` : '');
       info.className = 't13 pre';
       info.style.color = closing > t ? 'var(--est)' : 'var(--sub)';
+      const done = CardLogic.confirmedBill(data, cd, raw);
+      failBox.style.display = done ? '' : 'none';
+      failToggle.input.checked = !!(done && done.payOn);
+      failDate.value = (done && done.payOn) || D.max(t, D.plusDays(CardLogic.payDay(raw), 1));
+      showFail();
     };
     rebuild();
     body.append(label('確定した請求額（円）'), amount);
     if (cards.length > 1) body.append(label('カード'), cardRow);
-    body.append(payLabel, payRow, info);
+    body.append(payLabel, payRow, info, failBox);
     openSheet({ title: 'カードの請求', body, saveLabel: '記録する', keyboard: true,
       neutral: CardLogic.confirmedBill(data, cd, raw) ? ['この請求を削除', () => {
         if (!CardLogic.confirmedBill(repo.data, cd, raw)) { toast('この請求はまだ確定していません'); return; }
@@ -1400,8 +1414,11 @@
       onSave: () => {
         const v = parseYen(amount.value);
         if (v == null || v < 0) { toast('請求額を入力してください'); return false; }
-        const okk = repo.setBill(cd, raw, v, t);
-        if (okk) { toast(`記録しました：${cd.name} ${md(CardLogic.payDay(raw))}引き落とし ${yen(v)}`); render(); } else toast('保存できませんでした');
+        const failed = failBox.style.display !== 'none' && failToggle.input.checked;
+        if (failed && !D.valid(failDate.value)) { toast('実際に払う日を選んでください'); return false; }
+        const payOn = failed ? failDate.value : null;
+        const okk = repo.setBill(cd, raw, v, t, payOn);
+        if (okk) { toast(payOn ? `記録しました：${cd.name}の請求 ${yen(v)} を ${md(payOn)}に払う` : `記録しました：${cd.name} ${md(CardLogic.payDay(raw))}引き落とし ${yen(v)}`); render(); } else toast('保存できませんでした');
         return okk;
       } });
   }
@@ -1763,22 +1780,64 @@
     const noShift = isNoShiftAccount(e.accountId);
     const [nomDate, nomAmount] = BC.nominal(e, originalDate, noShift);
     const cur = (e.changes || []).find((c) => c.originalDate === originalDate);
+    const base = cur && cur.amount != null ? cur.amount : nomAmount;   // この回に払う予定の額
     const body = div('form');
     body.append(txt(`予定どおりなら ${ymd(nomDate)}・${yen(nomAmount)}`, 't13 t-sub', 'padding-top:12px'));
-    const amount = amountField(cur && cur.amount != null ? cur.amount : nomAmount);
+    // 何をするか：日付・金額を変える／一部だけ払った（残りを次の回へ）／この回は無し
+    const MODES = ['日付・金額を変える', '一部だけ払った', 'この回は無し'];
+    let mode = cur && cur.skipped ? 2 : 0;
+    const modeRow = div('');
+    const amount = amountField(base);
     const dateF = dateInput((cur && cur.date) || nomDate);
-    const skip = toggle('この回は無し（飛ばす）', cur && cur.skipped);
-    const fields = div('', label('日付'), dateF, label('金額（円）'), amount,
-      txt(`払えなかった分を翌月にまとめる場合は、日付を翌月にしてください（翌月に「${D.m(originalDate)}月分」として出ます）。`, 'note'));
-    const show = () => { fields.style.display = skip.input.checked ? 'none' : ''; };
-    skip.input.addEventListener('change', show);
-    show();
-    body.append(fields, skip.el);
+    const changeBox = div('', label('日付'), dateF, label('金額（円）'), amount,
+      txt(`利息や遅延損害金で増えたときは、実際に払う額にしてください。払えなかった分を翌月にまとめる場合は、日付を翌月にしてください（翌月に「${D.m(originalDate)}月分」として出ます）。`, 'note'));
+    // 一部だけ払った：払った額と、残りを足す回（次の3回から選ぶ。ふつうは次の回）
+    const paid = amountField(null);
+    const targets = BC.rawDates(e, D.plusYears(originalDate, 3)).filter((d) => d > originalDate &&
+      !((e.changes || []).find((c) => c.originalDate === d && c.skipped))).slice(0, 3);
+    let target = targets[0] || null;
+    const targetRow = div('');
+    const partialNote = div('field-note');
+    const amountOf = (d) => { const c = (e.changes || []).find((x) => x.originalDate === d); return c && c.amount != null ? c.amount : BC.nominal(e, d, noShift)[1]; };
+    const updatePartial = () => {
+      const v = parseYen(paid.value);
+      partialNote.textContent = v == null ? `この回に払う予定の額は ${yen(base)} です` : v < 0 || v >= base ? `払った額は 0〜${yen(base - 1)} で入れてください`
+        : target ? `残り ${yen(base - v)} を ${md(target)}の回に足します（その回は ${yen(amountOf(target) + base - v)} になります）` : '残りを足す回がありません（最終回です）';
+    };
+    const drawTargets = () => {
+      targetRow.textContent = '';
+      targetRow.append(chipRow(targets.map((d) => chip(`${md(d)}の回`, d === target, () => { target = d; drawTargets(); updatePartial(); }))));
+    };
+    paid.addEventListener('input', updatePartial);
+    const partialBox = div('', label('払った額（円）'), paid, label('残りを足す回'), targetRow, partialNote);
+    const skipBox = txt('この回は払わず、次の回もふだんどおりの額にします。残りの回数は1回減ります。', 'note');
+    const draw = () => {
+      modeRow.textContent = '';
+      modeRow.append(chipRow(MODES.map((m, i) => chip(m, i === mode, () => { mode = i; draw(); })), 'wrap'));
+      changeBox.style.display = mode === 0 ? '' : 'none';
+      partialBox.style.display = mode === 1 ? '' : 'none';
+      skipBox.style.display = mode === 2 ? '' : 'none';
+    };
+    drawTargets(); updatePartial(); draw();
+    body.append(label('この回をどうしますか'), modeRow, changeBox, partialBox, skipBox);
     openSheet({ title: 'この回だけ変更', body,
       neutral: cur ? ['予定どおりに戻す', () => { if (repo.setOccurrenceChange(e.id, originalDate, null)) { toast('予定どおりに戻しました'); render(); } else toast('保存できませんでした'); }] : null,
       onSave: () => {
+        if (mode === 1) {
+          const v = parseYen(paid.value);
+          if (v == null || v < 0 || v >= base) { toast(`払った額を 0〜${yen(base - 1)} で入力してください`); return false; }
+          if (!target) { toast('残りを足す回がありません（最終回は、日付・金額を変えてください）'); return false; }
+          const tc = (e.changes || []).find((x) => x.originalDate === target);
+          // 0円なら、その回は無し（飛ばす）にして、全額を次の回に足す
+          const changeA = v === 0 ? { originalDate, date: null, amount: null, skipped: true }
+            : { originalDate, date: cur && cur.date ? cur.date : null, amount: v, skipped: false };
+          const changeB = { originalDate: target, date: tc && tc.date ? tc.date : null, amount: amountOf(target) + base - v, skipped: false };
+          const okk = repo.setPartialPayment(e.id, changeA, changeB, base - v);
+          if (okk) { toast(`残り ${yen(base - v)} を ${md(target)}の回に足しました`); render(); } else toast('保存できませんでした');
+          return okk;
+        }
         let change;
-        if (skip.input.checked) change = { originalDate, date: null, amount: null, skipped: true };
+        if (mode === 2) change = { originalDate, date: null, amount: null, skipped: true };
         else {
           const v = parseYen(amount.value), dd = dateF.value;
           if (v == null || v <= 0) { toast('金額を入力してください'); return false; }

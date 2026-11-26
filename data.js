@@ -22,8 +22,8 @@
   // ===================================================================
   const KEY = 'kakeibo.budget';
   const BudgetStore = {
-    /** 1〜3=Android v0.1〜0.4、4=確定だけ、5=残高の記録、6=電子マネー、7=この回だけの変更、8=請求ごとの口座・使わないカード、9=残高を確かめた順番、10=毎月以外の繰り返し（repeatEvery）。 */
-    VERSION: 10,
+    /** 1〜3=Android v0.1〜0.4、4=確定だけ、5=残高の記録、6=電子マネー、7=この回だけの変更、8=請求ごとの口座・使わないカード、9=残高を確かめた順番、10=毎月以外の繰り返し（repeatEvery）、11=引き落とせなかった請求の支払日（payOn）。 */
+    VERSION: 11,
     storage: (() => { try { return window.localStorage; } catch (e) { return null; } })(),
 
     load(today) {
@@ -71,7 +71,7 @@
           chargeFrom: e.chargeFrom ?? null,
           changes: (e.changes || []).map((c) => ({ originalDate: c.originalDate, date: c.date ?? null, amount: c.amount ?? null, skipped: !!c.skipped })) })),
         cards: d.cards.map((c) => ({ id: c.id, name: c.name, closingDay: c.closingDay, paymentDay: c.paymentDay, accountId: c.accountId, retired: !!c.retired })),
-        bills: d.bills.map((b) => ({ id: b.id, cardId: b.cardId, paymentDate: b.paymentDate, amount: b.amount, inputDate: b.inputDate, accountId: b.accountId })),
+        bills: d.bills.map((b) => ({ id: b.id, cardId: b.cardId, paymentDate: b.paymentDate, amount: b.amount, inputDate: b.inputDate, accountId: b.accountId, payOn: b.payOn || null })),
         snapshots: d.snapshots.map((s) => ({ accountId: s.accountId, date: s.date, amount: s.amount, order: s.order ? s.order.slice() : null })),
         unrecordedSeen: { ...(d.unrecordedSeen || {}) },
         history: d.history.map((h) => ({ at: h.at, text: h.text })),
@@ -106,6 +106,7 @@
       const cards = arr('cards').map((o) => ({ id: str(o, 'id'), name: str(o, 'name'), closingDay: num(o, 'closingDay'), paymentDay: num(o, 'paymentDay'), accountId: str(o, 'accountId'), retired: !!o.retired }));
       const cardAccount = new Map(cards.map((c) => [c.id, c.accountId]));
       const bills = arr('bills').map((o) => ({ id: str(o, 'id'), cardId: str(o, 'cardId'), paymentDate: date(o, 'paymentDate'), amount: num(o, 'amount'), inputDate: date(o, 'inputDate'),
+        payOn: dateOrNull(o, 'payOn'),   // 版10までは無い
         accountId: typeof o.accountId === 'string' ? o.accountId : (cardAccount.get(o.cardId) || '') }));
       const snapshots = Array.isArray(root.snapshots)
         ? root.snapshots.map((o) => ({ accountId: str(o, 'accountId'), date: date(o, 'date'), amount: num(o, 'amount'),
@@ -354,10 +355,25 @@
         `毎月の予定を終了：${e.name}（${today}まで。過去の回は残す）`);
     }
 
-    setBill(card, paymentRaw, amount, today) {
+    setBill(card, paymentRaw, amount, today, payOn = null) {
       const old = CardLogic.confirmedBill(this.data, card, paymentRaw);
-      const text = `カードの請求を確定：${card.name} ${paymentRaw}払い ${amount}円` + (old ? `（${old.amount}円から変更）` : '');
-      return this.commit(CardLogic.setBill(this.data, card, paymentRaw, amount, today, newId()), text);
+      const text = `カードの請求を確定：${card.name} ${paymentRaw}払い ${amount}円` + (old && old.amount !== amount ? `（${old.amount}円から変更）` : '') +
+        (payOn ? `、引き落とせず ${payOn} に払う` : old && old.payOn ? '、予定どおりの引き落としに戻す' : '');
+      return this.commit(CardLogic.setBill(this.data, card, paymentRaw, amount, today, newId(), payOn), text);
+    }
+
+    /**
+     * 一部だけ払った：その回を払った額にし、残りを別の回（ふつうは次の回）に足す（1回の操作として元に戻せる）。
+     * changeA はその回の変更、changeB は残りを足す回の変更。
+     */
+    setPartialPayment(entryId, changeA, changeB, remainder) {
+      const e = this.data.entries.find((x) => x.id === entryId);
+      if (!e) return false;
+      const keep = (e.changes || []).filter((c) => c.originalDate !== changeA.originalDate && c.originalDate !== changeB.originalDate);
+      const next = { ...e, changes: [...keep, changeA, changeB].sort((a, b) => K.cmpStr(a.originalDate, b.originalDate)) };
+      const md = (x) => `${D.m(x)}/${D.d(x)}`;
+      return this.commit({ ...this.data, entries: this.data.entries.map((x) => (x.id === entryId ? next : x)) },
+        `一部だけ払った：${e.name}（${md(changeA.originalDate)}の回は ${changeA.amount}円、残り ${remainder}円を ${md(changeB.originalDate)}の回に足す）`);
     }
 
     deleteBill(card, paymentRaw) {
@@ -438,7 +454,7 @@
       for (const b of data.bills.slice().sort((a, b2) => K.cmpStr(a.paymentDate, b2.paymentDate))) {
         const c = cardById.get(b.cardId);
         if (!c) continue;
-        rec('請求', { 名前: c.name, 区分: '確定', 金額: b.amount, 日付: b.paymentDate, 口座: accName.get(b.accountId) ?? accName.get(c.accountId), 時点: b.inputDate });
+        rec('請求', { 名前: c.name, 区分: '確定', 金額: b.amount, 日付: b.paymentDate, 口座: accName.get(b.accountId) ?? accName.get(c.accountId), 時点: b.inputDate, 最終日: b.payOn });
       }
       for (const r of forecast) {
         rec('見通し', { 名前: r.occ.name, 区分: r.occ.kind === INCOME ? '入金' : '出金', 金額: r.occ.amount, 日付: r.occ.date, 口座: accName.get(r.occ.accountId), 合計残高: r.totalAfter });
@@ -580,7 +596,7 @@
           if (amount < 0) throw new Bad(line, '「金額」は0円以上にしてください');
           const pay = date(line, r, '日付');
           const acc = get(r, '口座') ? accRef(line, r) : cards.find(([, c]) => c.id === cardId)[1].accountId;
-          return [line, { id: newId(), cardId, paymentDate: pay, amount, inputDate: date(line, r, '時点', false) || pay, accountId: acc }];
+          return [line, { id: newId(), cardId, paymentDate: pay, amount, inputDate: date(line, r, '時点', false) || pay, accountId: acc, payOn: date(line, r, '最終日', false) }];
         });
         const seenBill = new Set();
         for (const [line, b] of bills) {

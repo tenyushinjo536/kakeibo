@@ -2,8 +2,8 @@
  * オフラインでも開けるよう、アプリのファイルを端末に置いておく（入れたデータはここでは扱わない）。
  * 版を上げたら VERSION を変える。新しい版は、利用者が「更新する」を押したときに切り替わる。
  */
-const VERSION = 'kakeibo-0.24.0-1';
-const FILES = ['./', 'index.html', 'style.css', 'domain.js', 'data.js', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
+const VERSION = 'kakeibo-0.25.0-1';
+const FILES = ['./', 'index.html', 'style.css', 'domain.js', 'data.js', 'report.js', 'app.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(FILES.map((f) => new Request(f, { cache: 'reload' })))));

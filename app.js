@@ -6,7 +6,7 @@
   'use strict';
   const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.24.0';
+  const APP_VERSION = '0.25.0';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -759,6 +759,8 @@
   function renderBreakdown(t) {
     add(pageTitle('内訳', '確定した記録と残高の差から集計'));
     add(segmented(['月', '年'], st.bdYearMode ? 1 : 0, (i) => { st.bdYearMode = i === 1; render(); }));
+    // 見ている月・年をPDFに（印刷の画面から「PDFとして保存」・印刷）
+    add(div('pdf-row', btn(st.bdYearMode ? `${st.bdYear}年をPDFにする` : `${YM.y(st.bdMonth)}年${YM.m(st.bdMonth)}月をPDFにする`, 'outline', () => makePdf())));
     const title = st.bdYearMode ? `${st.bdYear}年` : `${YM.y(st.bdMonth)}年${YM.m(st.bdMonth)}月`;
     add(h('div', { style: 'padding-top:4px' }, monthNav(title, false, (delta) => {
       if (st.bdYearMode) st.bdYear += delta; else st.bdMonth = YM.plus(st.bdMonth, delta);
@@ -799,6 +801,26 @@
     renderBreakdownItems('支出の内訳', b.expenseItems, b.expense);
     renderBreakdownItems('収入の内訳', b.incomeItems, b.income);
     add(txt('「記録外の出金」「記録外の入金」は、残高を確かめたときに、記録した入出金では説明できない差額です。差が出た置き場所（財布・銀行など）ごとに分けています。いつ動いたかまでは分からないため、後で確かめた日の月に入れます。過去の記録を追加すると計算し直します。', 'note', 'padding-left:4px'));
+  }
+
+  /** レポートを組み立てて、印刷の画面を開く（iPhoneでは共有から「PDFとして保存」・「"ファイル"に保存」ができる）。 */
+  function makePdf() {
+    const r = st.bdYearMode ? K.Report.yearReport(repo.data, st.bdYear, today()) : K.Report.monthReport(repo.data, st.bdMonth, today());
+    let style = document.getElementById('print-style');
+    if (!style) {
+      style = h('style', { id: 'print-style' });
+      document.head.append(style);
+    }
+    // 画面では隠し、印刷のときだけレポートを出す（アプリの画面は印刷しない）
+    style.textContent = `#print{display:none}@media print{${K.Report.CSS}#app,#tabbar,#layer,.toast{display:none!important}#print{display:block!important}html,body{background:#fff!important}}`;
+    let box = document.getElementById('print');
+    if (!box) { box = h('div', { id: 'print' }); document.body.append(box); }
+    box.innerHTML = r.html;
+    const oldTitle = document.title;
+    document.title = r.title;   // 保存するPDFのファイル名になる
+    const restore = () => { document.title = oldTitle; window.removeEventListener('afterprint', restore); };
+    window.addEventListener('afterprint', restore);
+    setTimeout(() => window.print(), 50);
   }
 
   function renderBreakdownItems(title, items, total) {

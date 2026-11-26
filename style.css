@@ -276,4 +276,6 @@ input[type="date"].field::-webkit-date-and-time-value { text-align: left; }
 .check-row .dots { display: inline-flex; gap: 4px; margin-right: 2px; }
 .check-row .dots .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 @media (prefers-reduced-motion: reduce) { .flow-row, .flow-list.dragging .flow-row, .flow-row.settle { transition: none !important; } }
+.pdf-row { display: flex; justify-content: flex-end; padding-top: 10px; }
+.pdf-row .btn { min-height: 40px; font-size: 14px; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

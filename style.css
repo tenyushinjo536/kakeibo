@@ -125,6 +125,8 @@ button { cursor: pointer; }
 .btn.danger { color: var(--warn); }
 .btn.outline.danger { border-color: var(--warn); }
 .btn.block { display: block; width: 100%; }
+.btn.primary.small { min-height: 44px; font-size: 15px; padding: 0 22px; }
+.place .actions { align-items: center; padding-top: 6px; }
 .btn:active { opacity: .7; }
 .btn-row { display: flex; gap: 8px; padding-top: 8px; }
 .btn-row > * { flex: 1; }

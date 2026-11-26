@@ -6,7 +6,7 @@
   'use strict';
   const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.20.0';
+  const APP_VERSION = '0.21.0';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -153,16 +153,33 @@
   const layer = () => document.getElementById('layer');
   const lockScroll = () => document.body.classList.toggle('locked', layer().children.length > 0);
 
-  /** 入力のシート。上の右端に保存ボタン（キーボードで隠れない）。onSave(close) が true を返したら閉じる。 */
-  function openSheet({ title, body, saveLabel = '保存', onSave, neutral, keyboard = false }) {
+  /**
+   * 入力のシート。保存ボタンは上の右端（キーボードで隠れない）と、入力欄の下（大きく、押し忘れにくい）の2か所。
+   * onSave(close) が true を返したら閉じる。入力の途中で閉じようとしたら「記録しますか？」と聞く（押し忘れ対策）。
+   * saveOnClose=true（並べ替えなど）は、閉じたときに変更があれば自動で保存する（isDirty で変更の有無を返す）。
+   */
+  function openSheet({ title, body, saveLabel = '保存', onSave, neutral, keyboard = false, saveOnClose = false, isDirty }) {
     const ov = div('overlay');
     const close = () => { ov.remove(); lockScroll(); };
-    const save = h('button', { class: 'sheet-btn strong', type: 'button', onclick: () => { if (onSave(close)) close(); } }, saveLabel);
+    const state = () => [...body.querySelectorAll('input')].map((x) => (x.type === 'checkbox' ? x.checked : x.value)).join('\u0001');
+    const initial = state();
+    const dirty = () => (isDirty ? isDirty() : state() !== initial);
+    const trySave = () => { if (onSave(close)) close(); };
+    /** キャンセル・外側のタップ・閉じるボタン。 */
+    const tryClose = () => {
+      if (!onSave || !dirty()) { close(); return; }
+      if (saveOnClose) { trySave(); return; }
+      dialog('入力した内容を記録しますか？', 'まだ記録していません。', [['記録しない', close, 'danger'], ['戻る', null], [saveLabel, trySave, 'b']]);
+    };
+    const save = h('button', { class: 'sheet-btn strong', type: 'button', onclick: saveOnClose ? tryClose : trySave }, saveOnClose ? '完了' : saveLabel);
     const panel = h('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
-      div('sheet-head', h('button', { class: 'sheet-btn', type: 'button', onclick: close }, 'キャンセル'), div('sheet-title', title), onSave ? save : h('span', { class: 'sheet-btn-ph' })),
-      div('sheet-body', body, neutral ? h('div', { style: 'padding:8px 20px 0' }, btn(neutral[0], 'outline danger', () => { close(); neutral[1](); }, 'block')) : null));
+      div('sheet-head', saveOnClose ? h('span', { class: 'sheet-btn-ph' }) : h('button', { class: 'sheet-btn', type: 'button', onclick: tryClose }, 'キャンセル'),
+        div('sheet-title', title), onSave ? save : h('button', { class: 'sheet-btn strong', type: 'button', onclick: close }, '閉じる')),
+      div('sheet-body', body,
+        onSave && !saveOnClose ? h('div', { style: 'padding:4px 20px 0' }, btn(saveLabel, 'primary', trySave, 'block')) : null,
+        neutral ? h('div', { style: 'padding:12px 20px 0' }, btn(neutral[0], 'outline danger', () => { close(); neutral[1](); }, 'block')) : null));
     ov.append(panel);
-    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('click', (e) => { if (e.target === ov) tryClose(); });
     layer().append(ov);
     lockScroll();
     // iPhone では、押した操作の中で focus するとキーボードが出る
@@ -1146,9 +1163,11 @@
     }
     makeSortable(list, move);
     draw();
-    openSheet({ title: `${D.m(date)}/${D.d(date)} の流れ`, body, onSave: () => {
-      const keys = order.map((x) => (x.type === 'check' ? CheckOrder.checkToken(x.acc.id) : CheckOrder.key(x.occ)));
-      const okk = repo.setDayOrder(date, keys);
+    const keysOf = () => order.map((x) => (x.type === 'check' ? CheckOrder.checkToken(x.acc.id) : CheckOrder.key(x.occ))).join(',');
+    const first = keysOf();
+    // 並べ替えは閉じたときに自動で保存する（保存ボタンの押し忘れを無くす。直後なら「元に戻す」で戻せる）
+    openSheet({ title: `${D.m(date)}/${D.d(date)} の流れ`, body, saveOnClose: true, isDirty: () => keysOf() !== first, onSave: () => {
+      const okk = repo.setDayOrder(date, keysOf().split(','));
       if (okk) { toast('並び順を保存しました'); render(); } else toast('保存できませんでした');
       return okk;
     } });
@@ -1457,8 +1476,9 @@
     const accounts = repo.data.accounts;
     if (!accounts.length) { toast('先に口座を追加してください'); return; }
     const body = div('form');
-    body.append(txt('確かめた置き場所だけ入力すれば保存できます（財布だけ、など）。空欄の置き場所は変わりません。', 't13 t-sub', 'padding-top:12px'));
+    body.append(txt('置き場所ごとの「保存」で1つずつ保存できます。いくつか入れて、下の「まとめて記録する」でも保存できます。空欄の置き場所は変わりません。', 't13 t-sub', 'padding-top:12px'));
     let sheet;
+    let savedAny = false;
     const fields = accounts.map((acc) => {
       const est = currentById[acc.id] ?? acc.balance;
       const si = signedInput('現在の残高');
@@ -1472,10 +1492,23 @@
       });
       body.append(div('place', div('head', div('n', acc.name), h('span', { class: 'badge' }, kindLabel(acc))), diff, si.el,
         div('actions', acc.isCash ? btn('枚数で数える', 'text', () => countCash((v) => { si.input.value = String(v); si.input.dispatchEvent(new Event('input')); })) : null,
-          btn(`${md(acc.asOf)}時点を訂正`, 'text', () => correctBalance(acc, () => sheet.close())))));
+          btn(`${D.m(acc.asOf)}/${D.d(acc.asOf)}を訂正`, 'text', () => correctBalance(acc, () => sheet.close())),
+          // この置き場所だけ保存する（1つずつ保存できる感じを出す。保存したら欄を空にして ✓ を出す）
+          btn('保存', 'primary small', () => {
+            const tt = si.input.value.trim(), v = parseYen(tt);
+            if (!tt) { toast(`${acc.name}の金額を入力してください`); return; }
+            if (v == null) { toast(`${acc.name}の金額を数字で入力してください`); return; }
+            if (!repo.updateBalances({ [acc.id]: v }, t, currentById)) { toast('保存できませんでした'); return; }
+            si.input.value = '';
+            savedAny = true;
+            diff.textContent = `✓ 保存しました：今日時点 ${yen(v)}`;
+            diff.style.color = 'var(--accent)';
+            toast(`${acc.name}の残高を保存しました`);
+            render();
+          }))));
       return [acc, si.input];
     });
-    sheet = openSheet({ title: '現在の残高', body, saveLabel: '記録する', keyboard: true, onSave: () => {
+    sheet = openSheet({ title: '現在の残高', body, saveLabel: 'まとめて記録する', keyboard: true, onSave: () => {
       const changes = {};
       for (const [acc, f] of fields) {
         const tt = f.value.trim();
@@ -1484,7 +1517,10 @@
         if (v == null) { toast(`${acc.name}の金額を数字で入力してください`); return false; }
         changes[acc.id] = v;
       }
-      if (!Object.keys(changes).length) { toast('金額が入力されていません'); return false; }
+      if (!Object.keys(changes).length) {
+        if (savedAny) return true;   // 1つずつ保存し終えている
+        toast('金額が入力されていません'); return false;
+      }
       const okk = repo.updateBalances(changes, t, currentById);
       if (okk) { toast('残高を更新しました（今日時点）'); render(); } else toast('保存できませんでした');
       return okk;

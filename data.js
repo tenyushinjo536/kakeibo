@@ -22,8 +22,8 @@
   // ===================================================================
   const KEY = 'kakeibo.budget';
   const BudgetStore = {
-    /** 1〜3=Android v0.1〜0.4、4=確定だけ、5=残高の記録、6=電子マネー、7=この回だけの変更、8=請求ごとの口座・使わないカード。 */
-    VERSION: 8,
+    /** 1〜3=Android v0.1〜0.4、4=確定だけ、5=残高の記録、6=電子マネー、7=この回だけの変更、8=請求ごとの口座・使わないカード、9=残高を確かめた順番。 */
+    VERSION: 9,
     storage: (() => { try { return window.localStorage; } catch (e) { return null; } })(),
 
     load(today) {
@@ -72,7 +72,7 @@
           changes: (e.changes || []).map((c) => ({ originalDate: c.originalDate, date: c.date ?? null, amount: c.amount ?? null, skipped: !!c.skipped })) })),
         cards: d.cards.map((c) => ({ id: c.id, name: c.name, closingDay: c.closingDay, paymentDay: c.paymentDay, accountId: c.accountId, retired: !!c.retired })),
         bills: d.bills.map((b) => ({ id: b.id, cardId: b.cardId, paymentDate: b.paymentDate, amount: b.amount, inputDate: b.inputDate, accountId: b.accountId })),
-        snapshots: d.snapshots.map((s) => ({ accountId: s.accountId, date: s.date, amount: s.amount })),
+        snapshots: d.snapshots.map((s) => ({ accountId: s.accountId, date: s.date, amount: s.amount, order: s.order ? s.order.slice() : null })),
         unrecordedSeen: { ...(d.unrecordedSeen || {}) },
         history: d.history.map((h) => ({ at: h.at, text: h.text })),
         legacy: d.legacy ?? null,
@@ -106,8 +106,9 @@
       const bills = arr('bills').map((o) => ({ id: str(o, 'id'), cardId: str(o, 'cardId'), paymentDate: date(o, 'paymentDate'), amount: num(o, 'amount'), inputDate: date(o, 'inputDate'),
         accountId: typeof o.accountId === 'string' ? o.accountId : (cardAccount.get(o.cardId) || '') }));
       const snapshots = Array.isArray(root.snapshots)
-        ? root.snapshots.map((o) => ({ accountId: str(o, 'accountId'), date: date(o, 'date'), amount: num(o, 'amount') }))
-        : accounts.map((a) => ({ accountId: a.id, date: a.asOf, amount: a.balance }));
+        ? root.snapshots.map((o) => ({ accountId: str(o, 'accountId'), date: date(o, 'date'), amount: num(o, 'amount'),
+          order: Array.isArray(o.order) ? o.order.map(String) : null }))   // 版8までは無い（並びの指定なし＝その日の出入りは全部「前」）
+        : accounts.map((a) => ({ accountId: a.id, date: a.asOf, amount: a.balance, order: null }));
       const unrecordedSeen = {};
       if (root.unrecordedSeen && typeof root.unrecordedSeen === 'object') for (const [k, x] of Object.entries(root.unrecordedSeen)) if (typeof x === 'number') unrecordedSeen[k] = x;
       const history = arr('history').map((o) => ({ at: String(o.at), text: String(o.text) }));
@@ -201,7 +202,30 @@
     accountNameTaken(name, exceptId) { return this.data.accounts.some((a) => a.name === name && a.id !== exceptId); }
     cardNameTaken(name, exceptId) { return this.data.cards.some((c) => c.name === name && c.id !== exceptId); }
 
-    static withSnapshot(list, s) { return [...list.filter((x) => !(x.accountId === s.accountId && x.date === s.date)), s]; }
+    /** 同じ口座・同じ日の記録は置き換える（確かめた順番の指定は引き継ぐ）。 */
+    static withSnapshot(list, s) {
+      const old = list.find((x) => x.accountId === s.accountId && x.date === s.date);
+      return [...list.filter((x) => x !== old), { order: old ? old.order || null : null, ...s }];
+    }
+
+    /** 残高を確かめた順番を保存する（order は上から起きた順の key と "@"）。 */
+    setCheckOrder(accountId, date, order) {
+      const a = this.data.accounts.find((x) => x.id === accountId);
+      if (!a) return false;
+      let snaps = this.data.snapshots;
+      let s = snaps.find((x) => x.accountId === accountId && x.date === date);
+      if (!s) {
+        if (date !== a.asOf) return false;
+        s = { accountId, date, amount: a.balance, order: null };
+        snaps = [...snaps, s];
+      }
+      const items = K.CheckOrder.itemsOn(this.data, accountId, date);
+      const byKey = new Map(items.map((o) => [K.CheckOrder.key(o), o]));
+      const after = order.slice(order.indexOf(K.CHECK) + 1).filter((k) => byKey.has(k)).map((k) => byKey.get(k).name);
+      const md = `${D.m(date)}/${D.d(date)}`;
+      const text = `残高を確かめた順番を変更：${a.name}（${md}・${s.amount}円）` + (after.length ? `、確かめた後に ${after.join('・')}` : '、この日の入出金はすべて確かめる前');
+      return this.commit({ ...this.data, snapshots: snaps.map((x) => (x === s ? { ...x, order: order.slice() } : x)) }, text);
+    }
 
     updateBalances(changes, today, currentById) {
       const ids = Object.keys(changes);
@@ -213,19 +237,9 @@
         return `${a.name} ${changes[id]}円（推定との差 ${diff >= 0 ? '+' : ''}${diff}）`;
       }).join('、');
       let snaps = this.data.snapshots;
-      for (const id of ids) snaps = BudgetRepository.withSnapshot(snaps, { accountId: id, date: today, amount: changes[id] });
+      // 新しく確かめた残高なので、その日の並びは指定なし（記録済みの出入りは全部「確かめる前」）
+      for (const id of ids) snaps = BudgetRepository.withSnapshot(snaps, { accountId: id, date: today, amount: changes[id], order: null });
       return this.commit({ ...this.data, accounts, snapshots: snaps }, text);
-    }
-
-    upsertEntryAndAdjust(e, label) {
-      const a = this.data.accounts.find((x) => x.id === e.accountId);
-      if (!a) return false;
-      const delta = e.kind === INCOME ? e.amount : -e.amount;
-      const entries = [...this.data.entries.filter((x) => x.id !== e.id), e];
-      const accounts = this.data.accounts.map((x) => (x.id === a.id ? { ...x, balance: x.balance + delta } : x));
-      const snapshots = this.data.snapshots.map((s) => (s.accountId === a.id && s.date === a.asOf ? { ...s, amount: s.amount + delta } : s));
-      return this.commit({ ...this.data, entries, accounts, snapshots },
-        `${label} ${e.name} ${e.amount}円（${e.date}）を記録し、${a.name}の残高に ${delta >= 0 ? '+' : ''}${delta}円を反映`);
     }
 
     upsertAccount(a) {
@@ -234,7 +248,7 @@
       const old = i >= 0 ? list[i] : null;
       const text = old ? `口座「${a.name}」を変更` : `口座「${a.name}」を追加（残高 ${a.balance}円）`;
       if (i >= 0) list[i] = a; else list.push(a);
-      const snaps = !old || old.balance !== a.balance ? BudgetRepository.withSnapshot(this.data.snapshots, { accountId: a.id, date: a.asOf, amount: a.balance }) : this.data.snapshots;
+      const snaps = !old || old.balance !== a.balance ? BudgetRepository.withSnapshot(this.data.snapshots, { accountId: a.id, date: a.asOf, amount: a.balance, order: null }) : this.data.snapshots;
       return this.commit({ ...this.data, accounts: list, snapshots: snaps }, text);
     }
 
@@ -386,7 +400,8 @@
       rec('情報', { 名前: `家計簿CSV 形式${this.FORMAT}`, 区分: `アプリ v${appVersion}`, 日付: today });
       for (const a of data.accounts) {
         const flags = [a.isDebit && '引き落とし', a.isSalary && '給料', a.isCash && '現金', a.isEmoney && '電子マネー', a.isIc && '交通系IC'].filter(Boolean);
-        rec('口座', { 名前: a.name, 区分: flags.join('・'), 金額: a.balance, 時点: a.asOf });
+        // 残高は「時点の日の終わり」の額で書く（確かめた後に起きた出入りを足す）。CSVの形は変えずに、どの版で読んでも同じ数字になる
+        rec('口座', { 名前: a.name, 区分: flags.join('・'), 金額: a.balance + K.CheckOrder.afterSum(data, a.id, a.asOf), 時点: a.asOf });
       }
       for (const c of data.cards) rec('カード', { 名前: c.name, 区分: c.retired ? '使わない' : '', 口座: accName.get(c.accountId), 締め日: c.closingDay, 支払日: c.paymentDay });
       for (const e of data.entries.slice().sort((a, b) => K.cmpStr(a.date, b.date))) {

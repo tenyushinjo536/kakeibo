@@ -122,6 +122,48 @@
   };
 
   // ===================================================================
+  // 残高を確かめた順番（データ版9）
+  // 残高の記録 snapshot.order は、その日のその口座の出入りの並び（上から起きた順）。"@" が残高を確かめた位置。
+  // "@" より下の出入りは、残高を確かめた後に起きた（残高に含まれない）。order が無い・載っていない出入りは「前」。
+  // ===================================================================
+  const CHECK = '@';
+  const CheckOrder = {
+    key: (o) => `${o.entryId}|${o.originalDate}`,
+    snapshotOf(data, accId, date) { return data.snapshots.find((s) => s.accountId === accId && s.date === date) || null; },
+    /** その日のその口座の出入り（既定の並び）。 */
+    itemsOn(data, accId, date) {
+      return BudgetCalculator.occurrences(data, date, date).filter((o) => o.accountId === accId).sort((a, b) => BudgetCalculator.occOrder(a, b));
+    },
+    /** 残高を確かめた後に起きた出入りの key。 */
+    afterKeys(data, accId, date) {
+      const s = this.snapshotOf(data, accId, date);
+      if (!s || !s.order) return new Set();
+      const i = s.order.indexOf(CHECK);
+      return new Set(i < 0 ? [] : s.order.slice(i + 1));
+    },
+    /** 確かめた後に起きた出入りの合計（＋入金・−出金）。残高にこれを足すと「その日の終わりの残高」。 */
+    afterSum(data, accId, date) {
+      const s = this.snapshotOf(data, accId, date);
+      if (!s || !s.order) return 0;
+      const after = this.afterKeys(data, accId, date);
+      if (!after.size) return 0;
+      return sum(this.itemsOn(data, accId, date).filter((o) => after.has(this.key(o))), (o) => (o.kind === INCOME ? o.amount : -o.amount));
+    },
+    /** 画面に出す並び：[{type:'check'} | {type:'item', occ}]。保存した並びに無い新しい出入りは、確かめた位置の前に入れる。 */
+    layout(data, accId, date) {
+      const items = this.itemsOn(data, accId, date);
+      const byKey = new Map(items.map((o) => [this.key(o), o]));
+      const s = this.snapshotOf(data, accId, date);
+      const order = s && s.order ? s.order.filter((k) => k === CHECK || byKey.has(k)) : [];
+      if (!order.includes(CHECK)) order.push(CHECK);
+      const known = new Set(order);
+      const fresh = items.map((o) => this.key(o)).filter((k) => !known.has(k));
+      order.splice(order.indexOf(CHECK), 0, ...fresh);
+      return order.map((k) => (k === CHECK ? { type: 'check' } : { type: 'item', occ: byKey.get(k) }));
+    },
+  };
+
+  // ===================================================================
   // 計算の本体
   // ===================================================================
   const BudgetCalculator = {
@@ -230,9 +272,15 @@
       const asOf = new Map(data.accounts.map((a) => [a.id, a.asOf]));
       let oldest = null;
       for (const a of data.accounts) if (oldest == null || a.asOf < oldest) oldest = a.asOf;
-      const from = D.plusDays(D.min(oldest || today, today), 1);
+      // 時点の当日から取る（確かめた後に起きた当日の出入りを数えるため。確かめる前の分は reflected で外す）
+      const from = D.min(oldest || today, today);
       const all = this.occurrences(data, from, to);
-      const reflected = (o) => o.date <= (asOf.has(o.accountId) ? asOf.get(o.accountId) : today);
+      // 時点の当日は、残高を確かめた後に起きた出入りだけを残高の外にする
+      const afterOf = new Map(data.accounts.map((a) => [a.id, CheckOrder.afterKeys(data, a.id, a.asOf)]));
+      const reflected = (o) => {
+        const d = asOf.has(o.accountId) ? asOf.get(o.accountId) : today;
+        return o.date < d || (o.date === d && !(afterOf.get(o.accountId) || new Set()).has(CheckOrder.key(o)));
+      };
       const order = (a, b) => this.occOrder(a, b);
       const passed = all.filter((o) => !reflected(o) && o.date <= today).sort(order);
       const future = all.filter((o) => !reflected(o) && o.date > today).sort(order);
@@ -312,7 +360,9 @@
       if (!ts.length) return res;
       const snaps = new Map();
       for (const a of data.accounts) {
-        const list = [[a.asOf, a.balance], ...data.snapshots.filter((s) => s.accountId === a.id).map((s) => [s.date, s.amount])];
+        // 残高は「その日の終わり」の額にそろえる（確かめた後に起きた出入りを足す）
+        const eod = (d, v) => v + CheckOrder.afterSum(data, a.id, d);
+        const list = [[a.asOf, eod(a.asOf, a.balance)], ...data.snapshots.filter((s) => s.accountId === a.id).map((s) => [s.date, eod(s.date, s.amount)])];
         const seen = new Set();
         const uniq = list.filter(([d]) => (seen.has(d) ? false : (seen.add(d), true)));
         uniq.sort((x, y) => cmpStr(x[0], y[0]));
@@ -457,7 +507,8 @@
         expense: expRec - cib + Math.max(0, unrecorded),
         expenseDone: sum(exp.filter(done), (o) => o.amount - cibOf(o)) + Math.max(0, unrecorded),
         unrecorded, cardCharge: charge - cib, end, rows,
-        beforeFirstBalance: first ? YM.atDay(month, 1) < first : false,
+        // 月の全部が、最初に残高を入れた日より前（その月に最初の記録がある月は含めない）
+        beforeFirstBalance: first ? YM.atEnd(month) < first : false,
       };
     },
 
@@ -501,7 +552,8 @@
       const occs = groupBy(BudgetCalculator.occurrences(data, D.plusDays(lo, 1), hi), (o) => o.accountId);
       const out = [];
       for (const [accId, list] of groupBy(snaps, (s) => s.accountId)) {
-        const sorted = [...groupBy(list, (s) => s.date).values()].map((v) => v[v.length - 1]).sort((a, b) => cmpStr(a.date, b.date));
+        const sorted = [...groupBy(list, (s) => s.date).values()].map((v) => v[v.length - 1]).sort((a, b) => cmpStr(a.date, b.date))
+          .map((s) => ({ ...s, amount: s.amount + CheckOrder.afterSum(data, accId, s.date) }));   // その日の終わりの額
         for (let i = 0; i + 1 < sorted.length; i++) {
           const a = sorted[i], b = sorted[i + 1];
           const moved = sum((occs.get(accId) || []).filter((o) => o.date > a.date && o.date <= b.date), (o) => (o.kind === INCOME ? o.amount : -o.amount));
@@ -587,5 +639,5 @@
   };
 
   Object.assign(K, { D, YM, INCOME, EXPENSE, sum, cmpStr, groupBy, noBankDays, isPrepaid, kindLabel,
-    JapaneseHolidays, BudgetCalculator, CardLogic, MonthlyLogic, BreakdownLogic });
+    CHECK, CheckOrder, JapaneseHolidays, BudgetCalculator, CardLogic, MonthlyLogic, BreakdownLogic });
 })(window.K = window.K || {});

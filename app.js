@@ -4,9 +4,9 @@
  */
 (function () {
   'use strict';
-  const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic,
+  const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.18.0';
+  const APP_VERSION = '0.19.0';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -546,16 +546,12 @@
     if (repo.undoLabel) {
       const u = card('ok');
       u.append(txt(repo.undoLabel, 't13'));
+      // 残高を確かめた日と同じ日の記録：確かめる前に起きたものとして保存したので、違えば並び順を直せるようにする
       const hint = repo.balanceHint;
       const hintAcc = hint && repo.data.accounts.find((a) => a.id === hint.accountId);
       if (hint && hintAcc) {
-        const what = hint.kind === INCOME ? '入金' : '支払い';
-        u.append(txt(`${hintAcc.name}の残高を確かめたのは（${md(hintAcc.asOf)}・${yen(hintAcc.balance)}）、この${what}の後でしたか？ 後なら、このままで正しいです（残高は変えていません）。`, 't12 t-sub', 'padding-top:4px'));
-        u.append(div('actions', btn('確かめたのはこの前：残高にも反映する', 'text', () => {
-          const sign = hint.kind === INCOME ? '＋' : '−';
-          if (repo.upsertEntryAndAdjust(hint, '残高にも反映：')) toast(`${hintAcc.name}の残高に ${sign}${yen(hint.amount)} を反映しました`); else toast('保存できませんでした');
-          render();
-        })));
+        u.append(txt(`${hintAcc.name}の残高（${md(hintAcc.asOf)}・${yen(hintAcc.balance)}）を確かめる前の入出金として計算しています。確かめた後に起きたときは、並び順を変えてください。`, 't12 t-sub', 'padding-top:4px'));
+        u.append(div('actions', btn('並び順を変える', 'text', () => checkOrderSheet(hintAcc.id, hintAcc.asOf))));
       }
       u.append(div('actions', btn('閉じる', 'text', () => { repo.clearUndo(); render(); }), btn('元に戻す', 'text b', () => { if (!repo.undo()) toast('戻せませんでした'); render(); })));
       add(u);
@@ -584,11 +580,27 @@
     add(header(`${m}月の入出金`));
     const list = card();
     if (!p.rows.length) list.append(txt('この月の確定した入出金はありません。', 't14 t-sub'));
+    // 残高を確かめた日に入出金があれば、その日の最後に「残高を確かめた」の行を出す（押すと並び順を変えられる）
+    const checks = new Map();
+    const addCheck = (accId, date, amount) => {
+      const a = repo.data.accounts.find((x) => x.id === accId);
+      if (!a || D.ym(date) !== hm || checks.has(accId + date) || !CheckOrder.itemsOn(repo.data, accId, date).length) return;
+      checks.set(accId + date, { a, date, amount });
+    };
+    for (const s of repo.data.snapshots) addCheck(s.accountId, s.date, s.amount);
+    for (const a of repo.data.accounts) addCheck(a.id, a.asOf, a.balance);
+    const checkRows = (date) => [...checks.values()].filter((c) => c.date === date).map((c) => {
+      const n = CheckOrder.afterKeys(repo.data, c.a.id, date).size;
+      return row(`${c.a.name}の残高を確かめた`, yen(c.amount), { rightColor: 'var(--sub)',
+        sub: (n ? `この日の入出金のうち${n}件は、確かめた後` : 'この日の入出金は、すべて確かめる前') + '・押すと並び順を変えられます',
+        onClick: () => checkOrderSheet(c.a.id, date) });
+    });
     p.rows.forEach((o, i) => {
       if (i > 0) list.append(divider());
       const done = o.date <= t;
       const sub = [accName(o.accountId), MonthlyLogic.shiftReason(o), done ? '完了' : null].filter(Boolean).join('・');
       list.append(moneyRow(o.date, o.name, o.amount, o.kind === INCOME, sub, null, () => openOccurrence(o.entryId, o.originalDate)));
+      if (!p.rows[i + 1] || p.rows[i + 1].date !== o.date) for (const r of checkRows(o.date)) { list.append(divider()); r.classList.add('check-row'); list.append(r); }
     });
     for (const e of repo.data.entries.filter((x) => x.repeatMonthly)) {
       for (const c of (e.changes || []).filter((x) => x.skipped && D.ym(x.originalDate) === hm)) {
@@ -1023,13 +1035,106 @@
     return false;
   }
 
-  /** 残高の時点以前の新しい記録は、残高に含まれているものとして保存（違えばホームで直せる）。 */
+  /** 残高を確かめた日と同じ日の新しい記録は「確かめる前」として保存し、ホームのカードから並び順を直せるようにする。 */
   function saveAskingBalance(e, isNew, lbl) {
     const acc = repo.data.accounts.find((a) => a.id === e.accountId);
-    if (!isNew || e.repeatMonthly || !acc || e.date > acc.asOf) return save(e, lbl);
+    if (!isNew || e.repeatMonthly || !acc || e.date > D.plusDays(acc.asOf, 7)) return save(e, lbl);
     const okk = repo.upsertEntry(e, lbl);
-    if (okk) { repo.balanceHint = e; toast(`記録しました：${e.name} ${yen(e.amount)}（${ymd(e.date)}）`); render(); } else toast('保存できませんでした');
+    if (okk) {
+      // 銀行の休みで日付がずれる場合もあるので、実際に時点の日に動くかで判断する
+      if (CheckOrder.itemsOn(repo.data, acc.id, acc.asOf).some((o) => o.entryId === e.id)) repo.balanceHint = e;
+      toast(`記録しました：${e.name} ${yen(e.amount)}（${ymd(e.date)}）`);
+      render();
+    } else toast('保存できませんでした');
     return okk;
+  }
+
+  // ===================================================================
+  // 残高を確かめた順番（その日の入出金と「残高を確かめた」を、起きた順に並べる）
+  // ===================================================================
+  function checkOrderSheet(accId, date) {
+    const acc = repo.data.accounts.find((a) => a.id === accId);
+    if (!acc) return;
+    const snap = CheckOrder.snapshotOf(repo.data, accId, date);
+    const amount = snap ? snap.amount : acc.balance;
+    let order = CheckOrder.layout(repo.data, accId, date);
+    const body = div('form');
+    body.append(txt('上から、起きた順に並べてください。「残高を確かめた」より下の入出金は、確かめた後に起きたものとして計算します。行を長押しすると、指で動かせます。', 't13 t-sub', 'padding-top:12px'));
+    const list = h('div', { class: 'order-list', role: 'list' });
+    const result = txt('', 't14 pre', 'padding-top:12px');
+    body.append(div('order-time', `${md(date)}　0時`), list, div('order-time', '24時'), result);
+    const signedOf = (o) => (o.kind === INCOME ? o.amount : -o.amount);
+    const updateResult = () => {
+      const i = order.findIndex((x) => x.type === 'check');
+      const after = order.slice(i + 1);
+      const end = amount + sum(after, (x) => signedOf(x.occ));
+      result.textContent = `確かめた残高 ${yen(amount)}` + (after.length ? `\n確かめた後の入出金 ${signed(sum(after, (x) => signedOf(x.occ)))}` : '') +
+        `\n→ この日の終わりの${acc.name}の残高 ${yen(end)}`;
+    };
+    const move = (from, to) => {
+      if (to < 0 || to >= order.length) return;
+      const [x] = order.splice(from, 1);
+      order.splice(to, 0, x);
+      draw();
+    };
+    function rowEl(it, i) {
+      const isCheck = it.type === 'check';
+      const o = it.occ;
+      const label = isCheck ? `${acc.name}の残高を確かめた ${yen(amount)}` : `${o.name} ${o.kind === INCOME ? '＋' : '−'}${yen(o.amount)}`;
+      const el = h('div', { class: 'order-row' + (isCheck ? ' check' : ''), role: 'listitem', 'aria-label': `${i + 1}番目：${label}` },
+        h('div', { class: 'grip', 'aria-hidden': 'true' }, '≡'),
+        div('main', div('n', isCheck ? '残高を確かめた' : o.name), div('s', isCheck ? acc.name : (o.kind === INCOME ? '入金' : '出金'))),
+        h('div', { class: 'amt', style: isCheck ? null : `color:${o.kind === INCOME ? 'var(--income)' : 'var(--text)'}` }, isCheck ? yen(amount) : (o.kind === INCOME ? '＋' : '−') + yen(o.amount)),
+        div('ud', h('button', { type: 'button', 'aria-label': `${label}を上へ`, disabled: i === 0, onclick: () => move(i, i - 1) }, '↑'),
+          h('button', { type: 'button', 'aria-label': `${label}を下へ`, disabled: i === order.length - 1, onclick: () => move(i, i + 1) }, '↓')));
+      el._item = it;
+      attachDrag(el);
+      return el;
+    }
+    function draw() {
+      list.textContent = '';
+      order.forEach((it, i) => list.append(rowEl(it, i)));
+      updateResult();
+    }
+    /** 長押しで浮かせ、指でなぞった位置へ動かす（短く触れただけ・縦にすぐ動かした場合はふつうのスクロール）。 */
+    function attachDrag(el) {
+      let timer = null, sy = 0, lifted = false;
+      const sync = () => { order = [...list.children].map((r) => r._item); updateResult(); };
+      const begin = (y) => { sy = y; timer = setTimeout(() => { lifted = true; el.classList.add('lifted'); if (navigator.vibrate) navigator.vibrate(10); }, 350); };
+      const moveTo = (y) => {
+        if (!lifted) { if (Math.abs(y - sy) > 8) clearTimeout(timer); return false; }
+        const prev = el.previousElementSibling, next = el.nextElementSibling;
+        if (prev && y < prev.getBoundingClientRect().top + prev.offsetHeight / 2) { list.insertBefore(el, prev); sync(); }
+        else if (next && y > next.getBoundingClientRect().top + next.offsetHeight / 2) { list.insertBefore(next, el); sync(); }
+        return true;
+      };
+      const finish = () => { clearTimeout(timer); if (lifted) { lifted = false; draw(); } };
+      el.addEventListener('touchstart', (e) => {
+        if (e.target.closest('button') || e.touches.length > 1) return;
+        begin(e.touches[0].clientY);
+        const tm = (ev) => { if (moveTo(ev.touches[0].clientY)) ev.preventDefault(); };
+        const te = () => { document.removeEventListener('touchmove', tm); document.removeEventListener('touchend', te); document.removeEventListener('touchcancel', te); finish(); };
+        document.addEventListener('touchmove', tm, { passive: false });
+        document.addEventListener('touchend', te);
+        document.addEventListener('touchcancel', te);
+      }, { passive: true });
+      el.addEventListener('mousedown', (e) => {
+        if (e.target.closest('button')) return;
+        begin(e.clientY);
+        const mm = (ev) => moveTo(ev.clientY);
+        const mu = () => { document.removeEventListener('mousemove', mm); document.removeEventListener('mouseup', mu); finish(); };
+        document.addEventListener('mousemove', mm);
+        document.addEventListener('mouseup', mu);
+      });
+      el.addEventListener('contextmenu', (e) => e.preventDefault());
+    }
+    draw();
+    openSheet({ title: `${md(date)} ${acc.name}の並び順`, body, onSave: () => {
+      const keys = order.map((x) => (x.type === 'check' ? K.CHECK : CheckOrder.key(x.occ)));
+      const okk = repo.setCheckOrder(accId, date, keys);
+      if (okk) { toast('並び順を保存しました'); render(); } else toast('保存できませんでした');
+      return okk;
+    } });
   }
 
   function confirmDelete(e) {

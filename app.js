@@ -6,7 +6,7 @@
   'use strict';
   const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder, SlotLogic,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.26.0';
+  const APP_VERSION = '0.26.1';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -533,10 +533,10 @@
     const note = (x) => div('eq-note', x);
     hero.append(h('div', { style: 'height:10px' }));
     hero.append(eqRow(showBar ? 'var(--ch-blue)' : null, '前月繰越', yen(p.start), 'var(--text)'));
-    hero.append(eqRow(incomeMark, '＋ 収入', yen(p.income), 'var(--income)'));
+    hero.append(tapToItems(eqRow(incomeMark, '＋ 収入 ›', yen(p.income), 'var(--income)'), () => showMonthItems(hm, true)));
     const incNotes = [p.kind === 'CURRENT' ? `うち入金済み ${yen(p.incomeDone)}` : null, p.unrecorded < 0 ? `うち雑収入 ${yen(-p.unrecorded)}（残高の差から）` : null].filter(Boolean);
     if (incNotes.length) hero.append(note(incNotes.join('・')));
-    hero.append(eqRow(showBar ? 'var(--ch-orange)' : null, '− 出金', yen(p.expense), 'var(--text)'));
+    hero.append(tapToItems(eqRow(showBar ? 'var(--ch-orange)' : null, '− 出金 ›', yen(p.expense), 'var(--text)'), () => showMonthItems(hm, false)));
     const expNotes = [p.kind === 'CURRENT' ? `うち支払済み ${yen(p.expenseDone)}` : null, p.unrecorded > 0 ? `うち雑費 ${yen(p.unrecorded)}（残高の差から）` : null].filter(Boolean);
     if (expNotes.length) hero.append(note(expNotes.join('・')));
     if (p.cardCharge > 0) hero.append(eqRow(incomeMark, '＋ カードからのチャージ（請求は翌月以降）', yen(p.cardCharge), 'var(--text)'));
@@ -601,7 +601,9 @@
           const e = repo.data.entries.find((x) => x.id === o.entryId);
           if (!e) return;
           if (i > 0) oc.append(divider());
-          oc.append(row(`${md(o.date)}  ${o.name}`, '金額を入力', { rightColor: 'var(--accent)', sub: `${accName(o.accountId)}・入れるまで残高の計算に入りません`, onClick: () => slotAmount(e, o.originalDate) }));
+          const ec = e.cardId ? repo.data.cards.find((c) => c.id === e.cardId) : null;
+          oc.append(row(`${md(o.date)}  ${o.name}`, '金額を入力', { rightColor: 'var(--accent)',
+            sub: ec ? `カード：${ec.name}・請求額を入れるときの内訳になります` : `${accName(o.accountId)}・入れるまで残高の計算に入りません`, onClick: () => slotAmount(e, o.originalDate) }));
         });
         add(oc);
       }
@@ -901,6 +903,33 @@
     add(c);
   }
 
+  /** 式の行を押せるようにする（押すと内訳）。 */
+  function tapToItems(el, onClick) {
+    el.classList.add('tap');
+    el.setAttribute('role', 'button'); el.tabIndex = 0;
+    el.style.minHeight = '44px';
+    el.addEventListener('click', onClick);
+    return el;
+  }
+
+  /** ホームの「＋収入」「−出金」を押したとき：その月の内訳（出金は固定費と変動費に分けて）。行を押すと中身。 */
+  function showMonthItems(month, income) {
+    const [f, t] = BreakdownLogic.monthRange(month);
+    const b = BreakdownLogic.compute(repo.data, f, t, today());
+    const body = div('form');
+    const section = (title, items) => {
+      if (!items.length) return;
+      if (title) body.append(txt(`${title}　${yen(sum(items, (x) => x.amount))}`, 't13 t-sub b', 'padding-top:12px'));
+      for (const it of items) body.append(row(it.label, yen(it.amount), { onClick: () => showItemDetails(it) }));
+    };
+    if (income) section(null, b.incomeItems);
+    else { section('固定費', b.expenseItems.filter((x) => x.fixed)); section('変動費', b.expenseItems.filter((x) => !x.fixed)); }
+    if (!(income ? b.incomeItems : b.expenseItems).length) body.append(txt('この月の記録はありません。', 't14 t-sub', 'padding-top:12px'));
+    body.append(txt(`内訳の合計 ${yen(income ? b.income : b.expense)}。カードからのチャージの扱いなどで、ホームの数字と少し違うことがあります。`, 'note'));
+    body.append(h('div', { style: 'padding-top:8px' }, btn('内訳タブで見る', 'text', () => { sheet.close(); st.bdYearMode = false; st.bdMonth = month; switchTab('breakdown'); })));
+    const sheet = openSheet({ title: `${YM.m(month)}月の${income ? '収入' : '出金'}の内訳`, body });
+  }
+
   function showItemDetails(item) {
     const body = div('form');
     if (item.note) body.append(txt(item.note, 't13 t-sub', 'padding-top:12px'));
@@ -1111,7 +1140,7 @@
     draw();
     return box;
   }
-  const CARD_PAY_NOTE = 'カードで払うものは、カードの請求でまとめて引かれるので、残高の計算には入れません。請求額を入れるときに、内訳（固定費）として確かめます。';
+  const CARD_PAY_NOTE = 'カードで払うものは、カードの請求でまとめて引かれるので、残高の計算には入れません。請求額を入れるときに、内訳（固定費）として確かめます。金額が毎回ちがうものは、日付を過ぎるとホームの「金額を入れていない支出」に出るので、そこで入れます。';
 
   /** 口座を選ぶチップの列。 */
   function accountChips(accounts, selected, onPick) {
@@ -2076,11 +2105,13 @@
   function slotAmount(e, originalDate) {
     const nomDate = BC.nominal(e, originalDate, isNoShiftAccount(e.accountId))[0];
     const prev = SlotLogic.previousAmount(repo.data, e, originalDate);
+    const ec = e.cardId ? repo.data.cards.find((c) => c.id === e.cardId) : null;
     const body = div('form');
     const amount = amountField(null);
     if (prev != null) amount.placeholder = num(prev);
-    body.append(txt(`${ymd(nomDate)}・${accName(e.accountId)}`, 't13 t-sub', 'padding-top:12px'), label('確定した金額（円）'), amount,
+    body.append(txt(`${ymd(nomDate)}・${ec ? 'カード：' + ec.name : accName(e.accountId)}`, 't13 t-sub', 'padding-top:12px'), label('確定した金額（円）'), amount,
       txt(prev != null ? `前回は ${yen(prev)} でした（参考。計算には使いません）` : '明細・検針票・引き落としの記録で確かめた金額を入れてください。', 'note'));
+    if (ec) body.append(txt(`カードの請求でまとめて引かれるので、残高の計算には入りません。入れた金額は、${ec.name}の請求額を入れるときの内訳になります。`, 'note'));
     openSheet({ title: `${e.name}の金額`, body, saveLabel: '記録する', keyboard: true,
       neutral: ['この回は無し', () => {
         if (repo.setOccurrenceChange(e.id, originalDate, { originalDate, date: null, amount: null, skipped: true })) { toast('この回は無しにしました'); render(); } else toast('保存できませんでした');

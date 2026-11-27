@@ -703,9 +703,13 @@
         const items = bills.flatMap((b) => b.items || []);
         const fixedPart = Math.min(sum(bills, (b) => CardLogic.itemsTotal(b)), total);
         if (fixedPart > 0) {
-          const names = [...groupBy(items, (x) => x.name)].map(([n, xs]) => `${n} ${sum(xs, (x) => x.amount)}円`).join('、');
-          expenseItems.push({ label: `${label}（定期のもの）`, amount: fixedPart, details: byDate(l),
-            note: `請求額を入れたときに確かめた、カードで払う定期のものです：${names}`, fixed: true });
+          // 定期のものは1件ずつ固定費の行に出す（例：「サブスク（カード：A）」）。請求額で切った場合はまとめて1行
+          const byName = [...groupBy(items, (x) => x.name)].map(([n, xs]) => [n, sum(xs, (x) => x.amount)]);
+          const note = `請求額を入れたときに確かめた、${cardName}で払う定期のものです（請求額に含まれます）`;
+          if (sum(byName, (x) => x[1]) === fixedPart) {
+            for (const [n, v] of byName) if (v > 0) expenseItems.push({ label: `${n}（${label}）`, amount: v, details: byDate(l), note, fixed: true });
+          } else expenseItems.push({ label: `${label}（定期のもの）`, amount: fixedPart, details: byDate(l),
+            note: note + '：' + byName.map(([n, v]) => `${n} ${v}円`).join('、'), fixed: true });
         }
         const notes = [
           charged > 0 ? `請求のうちチャージ ${charged}円は、電子マネー・交通系ICで使った分として数えるため、ここでは差し引いています` : null,
@@ -796,21 +800,24 @@
   // 枠：金額は毎回ちがい、確定したら入れる繰り返し（水道・電気・通信費など）。Android版 domain/Slots.kt と同じ
   // ===================================================================
   const SlotLogic = {
-    /** 口座から払う枠の、金額待ちの回（始まりの日から to まで、日付順）。カードで払う枠は、請求の画面で金額を入れる。 */
-    pending(data, to) {
+    /**
+     * 枠の、金額待ちの回（始まりの日から to まで、日付順）。ふだんは口座から払う枠だけ（計算に入れていないことの注記用）。
+     * withCard=true ならカードで払う枠も含める（カードで払う枠は残高の計算には入らず、入れた金額は請求の内訳の初期値になる）。
+     */
+    pending(data, to, withCard = false) {
       const accs = new Map(data.accounts.map((a) => [a.id, a]));
-      return data.entries.filter((e) => e.slot && !e.cardId && accs.has(e.accountId))
-        .flatMap((e) => BudgetCalculator.expand(e, e.date, to, noBankDays(accs.get(e.accountId)), true).filter((o) => o.pending))
+      const cards = new Set(data.cards.filter((c) => !c.retired).map((c) => c.id));
+      return data.entries.filter((e) => e.slot && (e.cardId ? withCard && cards.has(e.cardId) : accs.has(e.accountId)))
+        .flatMap((e) => BudgetCalculator.expand(e, e.date, to, !!e.cardId || noBankDays(accs.get(e.accountId)), true).filter((o) => o.pending))
         .sort((a, b) => cmpStr(a.date, b.date) || cmpStr(a.name, b.name));
     },
-    /** 日付を過ぎた（今日までの）金額待ち。ホームで知らせる。 */
-    overdue(data, today) { return this.pending(data, today); },
+    /** 日付を過ぎた（今日までの）金額待ち（カードで払う枠も含む）。ホームで知らせ、そこで金額を入れられる。 */
+    overdue(data, today) { return this.pending(data, today, true); },
     /** 参考に出す前回の金額（計算には使わない）。口座払いは before より前の「この回だけ」の金額、カード払いは before より前の請求の内訳から。 */
     previousAmount(data, e, before) {
       if (e.cardId) {
         const bills = data.bills.filter((b) => b.cardId === e.cardId && b.paymentDate < before).sort((a, b) => cmpStr(b.paymentDate, a.paymentDate));
         for (const b of bills) { const x = (b.items || []).find((i) => i.entryId === e.id); if (x) return x.amount; }
-        return null;
       }
       let best = null;
       for (const c of e.changes || []) if (!c.skipped && c.amount != null && c.originalDate < before && (!best || c.originalDate > best.originalDate)) best = c;

@@ -6,7 +6,7 @@
   'use strict';
   const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder, SlotLogic,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.26.1';
+  const APP_VERSION = '0.26.2';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -932,12 +932,51 @@
 
   function showItemDetails(item) {
     const body = div('form');
+    let sheet;
     if (item.note) body.append(txt(item.note, 't13 t-sub', 'padding-top:12px'));
-    item.details.forEach((o, i) => {
+    if ((item.subItems || []).length) {
+      // 中身（カードの定期のもの・繰り返しの回）：押すとその回の金額を入れる・変える。未入力は押すと入れられる
+      item.subItems.forEach((x, i) => {
+        if (i > 0) body.append(divider());
+        const e = repo.data.entries.find((y) => y.id === x.entryId);
+        const can = !!(e && e.repeatMonthly && x.originalDate);
+        const left = x.originalDate && !item.label.startsWith('カード') ? `${md(x.originalDate)}  ${x.name}` : x.name;
+        body.append(row(left, x.amount == null ? '未入力' : yen(x.amount), { rightColor: x.amount == null ? 'var(--est)' : null,
+          sub: can ? (x.amount == null ? '押すと金額を入れられます' : '押すと金額を変えられます') : null,
+          onClick: can ? () => { sheet.close(); if (e.slot) slotAmount(e, x.originalDate); else occurrence(e, x.originalDate); } : null }));
+      });
+    } else item.details.forEach((o, i) => {
       if (i > 0) body.append(divider());
       body.append(moneyRow(o.date, o.name, o.amount, o.kind === INCOME, accName(o.accountId)));
     });
-    openSheet({ title: `${item.label}　${yen(item.amount)}`, body });
+    sheet = openSheet({ title: `${item.label}　${yen(item.amount)}`, body });
+  }
+
+  /**
+   * 繰り返しの予定の、月ごとの金額の一覧（過去12か月〜先3か月）。行を押すとその回の金額を入れる・変える・無しにする。
+   * 金額が都度の予定は金額の入力、決まった金額の予定は「この回だけ変更」（金額・一部だけ払った・この回は無し）。
+   */
+  function slotMonths(e) {
+    const t = today();
+    const noShift = !!e.cardId || isNoShiftAccount(e.accountId);
+    const from = D.max(e.date, D.plusMonths(t, -12));
+    const occ = BC.expand(e, from, D.plusMonths(t, 3), noShift, true);
+    const skipped = (e.changes || []).filter((c) => c.skipped && c.originalDate >= from);
+    const pc = e.cardId ? repo.data.cards.find((c) => c.id === e.cardId) : null;
+    const payName = e.cardId ? 'カード：' + (pc ? pc.name : '削除したカード') : accName(e.accountId);
+    const body = div('form');
+    let sheet;
+    body.append(txt(`${K.repeatLabel(e)}・${payName}。行を押すと、その月の金額を入れたり変えたりできます。`, 't13 t-sub', 'padding-top:12px'));
+    const rows = [...occ.map((o) => [o.originalDate, o]), ...skipped.map((c) => [c.originalDate, null])].sort((a, b) => K.cmpStr(b[0], a[0]));
+    if (!rows.length) body.append(txt('この期間の回はありません。', 't14 t-sub', 'padding-top:8px'));
+    for (const [raw, o] of rows) {
+      body.append(divider());
+      const right = !o ? '無し' : o.pending ? '未入力' : o.changed ? `${yen(o.amount)}（変更）` : yen(o.amount);
+      body.append(row(`${D.y(raw)}/${md(o ? o.date : raw)}`, right, { rightColor: o && o.pending ? 'var(--est)' : !o ? 'var(--sub)' : null,
+        onClick: () => { sheet.close(); if (!o || !e.slot) occurrence(e, raw); else slotAmount(e, raw); } }));
+    }
+    body.append(h('div', { style: 'padding-top:8px' }, btn('予定を編集', 'text', () => { sheet.close(); editEntry(e, e.kind); })));
+    sheet = openSheet({ title: `${e.name}の金額`, body });
   }
 
   // ===================================================================
@@ -996,7 +1035,7 @@
       const pc = e.cardId ? data.cards.find((c) => c.id === e.cardId) : null;
       const payName = e.cardId ? 'カード：' + (pc ? pc.name : '削除したカード') : accName(e.accountId);
       rc.append(row(e.name, e.slot ? '金額は都度' : (inc ? '＋' : '−') + yen(e.amount), { rightColor: inc ? 'var(--income)' : e.slot ? 'var(--sub)' : 'var(--text)',
-        sub: K.repeatLabel(e) + (next ? `・次回 ${md(next.date)}` : '') + left + `・${payName}`, onClick: () => editEntry(e, e.kind) }));
+        sub: K.repeatLabel(e) + (next ? `・次回 ${md(next.date)}` : '') + left + `・${payName}`, onClick: () => slotMonths(e) }));
     });
     add(rc);
 
@@ -2107,7 +2146,8 @@
     const prev = SlotLogic.previousAmount(repo.data, e, originalDate);
     const ec = e.cardId ? repo.data.cards.find((c) => c.id === e.cardId) : null;
     const body = div('form');
-    const amount = amountField(null);
+    const curC = (e.changes || []).find((c) => c.originalDate === originalDate && !c.skipped);
+    const amount = amountField(curC && curC.amount != null ? curC.amount : null);
     if (prev != null) amount.placeholder = num(prev);
     body.append(txt(`${ymd(nomDate)}・${ec ? 'カード：' + ec.name : accName(e.accountId)}`, 't13 t-sub', 'padding-top:12px'), label('確定した金額（円）'), amount,
       txt(prev != null ? `前回は ${yen(prev)} でした（参考。計算には使いません）` : '明細・検針票・引き落としの記録で確かめた金額を入れてください。', 'note'));

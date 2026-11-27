@@ -4,9 +4,9 @@
  */
 (function () {
   'use strict';
-  const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder,
+  const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder, SlotLogic,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.25.0';
+  const APP_VERSION = '0.26.0';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -534,10 +534,10 @@
     hero.append(h('div', { style: 'height:10px' }));
     hero.append(eqRow(showBar ? 'var(--ch-blue)' : null, '前月繰越', yen(p.start), 'var(--text)'));
     hero.append(eqRow(incomeMark, '＋ 収入', yen(p.income), 'var(--income)'));
-    const incNotes = [p.kind === 'CURRENT' ? `うち入金済み ${yen(p.incomeDone)}` : null, p.unrecorded < 0 ? `うち記録外 ${yen(-p.unrecorded)}（残高の差から）` : null].filter(Boolean);
+    const incNotes = [p.kind === 'CURRENT' ? `うち入金済み ${yen(p.incomeDone)}` : null, p.unrecorded < 0 ? `うち雑収入 ${yen(-p.unrecorded)}（残高の差から）` : null].filter(Boolean);
     if (incNotes.length) hero.append(note(incNotes.join('・')));
     hero.append(eqRow(showBar ? 'var(--ch-orange)' : null, '− 出金', yen(p.expense), 'var(--text)'));
-    const expNotes = [p.kind === 'CURRENT' ? `うち支払済み ${yen(p.expenseDone)}` : null, p.unrecorded > 0 ? `うち記録外 ${yen(p.unrecorded)}（残高の差から）` : null].filter(Boolean);
+    const expNotes = [p.kind === 'CURRENT' ? `うち支払済み ${yen(p.expenseDone)}` : null, p.unrecorded > 0 ? `うち雑費 ${yen(p.unrecorded)}（残高の差から）` : null].filter(Boolean);
     if (expNotes.length) hero.append(note(expNotes.join('・')));
     if (p.cardCharge > 0) hero.append(eqRow(incomeMark, '＋ カードからのチャージ（請求は翌月以降）', yen(p.cardCharge), 'var(--text)'));
     if (p.cardCharge < 0) hero.append(eqRow(null, '− 以前のカードチャージ分の請求', yen(-p.cardCharge), 'var(--text)'));
@@ -548,6 +548,12 @@
     if (p.beforeFirstBalance) hero.append(txt('最初に残高を入れた日より前の月です。前月繰越は、記録した入出金から逆算した参考値です。', 'note'));
     if (!isPast && pending.length) {
       const tx = pending.length <= 2 ? pending.map((u) => `${md(u.date)}の${u.card.name}`).join('、') + 'の請求（確定待ち）は含みません' : `確定待ちのカード請求 ${pending.length}件は含みません`;
+      hero.append(txt(tx, 'note', 'color:var(--est)'));
+    }
+    // その月の、金額を入れていない枠（計算に入っていない）
+    const slotsHere = SlotLogic.pending(repo.data, YM.atEnd(hm)).filter((o) => D.ym(o.date) === hm);
+    if (slotsHere.length) {
+      const tx = slotsHere.length <= 2 ? slotsHere.map((o) => `${md(o.date)}の${o.name}`).join('、') + '（金額待ち）は含みません' : `金額待ちの支出 ${slotsHere.length}件は含みません`;
       hero.append(txt(tx, 'note', 'color:var(--est)'));
     }
     if (p.kind === 'CURRENT' && s.oldestAsOf) {
@@ -586,6 +592,19 @@
           `${md(tr.shortDate)}の引き落とし時に不足します。${md(tr.deadline)}までに ${yen(tr.amount)} 以上を入金し、入金後に現在の残高を入力してください。`,
           '現在の残高を入力', balances));
       }
+      // 日付を過ぎても金額を入れていない枠：入れるまで計算に入らないので知らせる
+      const overdue = SlotLogic.overdue(repo.data, t);
+      if (overdue.length) {
+        add(header('金額を入れていない支出'));
+        const oc = card();
+        overdue.forEach((o, i) => {
+          const e = repo.data.entries.find((x) => x.id === o.entryId);
+          if (!e) return;
+          if (i > 0) oc.append(divider());
+          oc.append(row(`${md(o.date)}  ${o.name}`, '金額を入力', { rightColor: 'var(--accent)', sub: `${accName(o.accountId)}・入れるまで残高の計算に入りません`, onClick: () => slotAmount(e, o.originalDate) }));
+        });
+        add(oc);
+      }
       if (s.unconfirmedBills.length) {
         add(header('次のカード請求'));
         const uc = card();
@@ -603,7 +622,7 @@
 
     add(header(`${m}月の入出金`));
     const list = card();
-    if (!p.rows.length) list.append(txt('この月の確定した入出金はありません。', 't14 t-sub'));
+    if (!p.rows.length && !slotsHere.length) list.append(txt('この月の確定した入出金はありません。', 't14 t-sub'));
     // 残高を確かめた日に入出金があれば、その日の最後に「この日の流れ」の行を出す（押すと並び順を変えられる）
     const flowSet = new Set(flowDates().filter((d) => D.ym(d) === hm));
     const flowLine = (date) => {
@@ -620,6 +639,13 @@
       list.append(moneyRow(o.date, o.name, o.amount, o.kind === INCOME, sub, null, () => openOccurrence(o.entryId, o.originalDate)));
       if ((!p.rows[i + 1] || p.rows[i + 1].date !== o.date) && flowSet.has(o.date)) { list.append(divider()); list.append(flowLine(o.date)); }
     });
+    // 枠の金額待ちの回：薄く1行（押すと金額を入れられる）
+    for (const o of slotsHere) {
+      const e = repo.data.entries.find((x) => x.id === o.entryId);
+      if (!e) continue;
+      if (list.childElementCount) list.append(divider());
+      list.append(row(`${md(o.date)}  ${o.name}`, '金額待ち', { rightColor: 'var(--est)', sub: `${accName(o.accountId)}・押すと金額を入れられます`, onClick: () => slotAmount(e, o.originalDate) }));
+    }
     for (const e of repo.data.entries.filter((x) => x.repeatMonthly)) {
       for (const c of (e.changes || []).filter((x) => x.skipped && D.ym(x.originalDate) === hm)) {
         list.append(divider());
@@ -663,7 +689,7 @@
     const series = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)'];
     const named = ranked.length <= series.length ? ranked : ranked.slice(0, series.length - 1);
     const hasOther = ranked.length > named.length;
-    const names = [...named, ...(hasOther ? ['その他'] : []), ...(hasExtra ? ['記録外の入金'] : [])];
+    const names = [...named, ...(hasOther ? ['その他'] : []), ...(hasExtra ? ['雑収入'] : [])];
     const colors = [...named.map((_, i) => series[i]), ...(hasOther ? ['var(--s-other)'] : []), ...(hasExtra ? ['var(--sub)'] : [])];
     const idx = (nm) => { const i = named.indexOf(nm); return i >= 0 ? i : named.length; };
     const values = months.map((ym, mi) => {
@@ -689,7 +715,7 @@
 
   function renderForecast(s3, t) {
     const sp = BC.summarize(repo.data, t, periods[st.period][1]);
-    add(pageTitle('見通し', '確定した入出金だけで計算（請求額が未確定のカード引き落としは含みません）'));
+    add(pageTitle('見通し', '確定した入出金だけで計算（請求額が未確定のカード引き落とし・金額待ちの支出は含みません）'));
     add(segmented(periods.map((x) => x[0]), st.period, (i) => { st.period = i; render(); }));
     add(txt(`${ymd(t)} 〜 ${ymd(sp.endDate)}`, 't12 t-sub', 'padding:10px 4px 4px'));
     const monthLabel = (ym) => `${YM.y(ym)}/${YM.m(ym)}`;
@@ -722,10 +748,10 @@
     add(mc);
 
     if (s3.loans.length || s3.monthlyFixed > 0) {
-      add(header('長期の返済・毎月の支払い'));
+      add(header('長期の返済・固定費'));
       const lc = card();
       lc.append(h('div', { style: 'display:flex' },
-        div('', txt('今月の定期支払い', 't13 t-sub'), money(s3.monthlyFixed, 22)),
+        div('', txt('今月の固定費（口座から）', 't13 t-sub'), money(s3.monthlyFixed, 22)),
         s3.loans.length ? h('div', { style: 'flex:1;padding-left:16px' }, txt('返済残高', 't13 t-sub'), money(sum(s3.loans, (l) => l.remainingTotal), 22)) : null));
       for (const l of s3.loans) {
         const entry = repo.data.entries.find((e) => e.id === l.entryId);
@@ -774,7 +800,7 @@
     const changed = BreakdownLogic.changedMonths(repo.data);
     if (Object.keys(changed).length) {
       const cur = BreakdownLogic.currentSeen(repo.data);
-      const lines = Object.keys(changed).sort().map((k) => `${YM.y(k)}年${YM.m(k)}月：記録外の入出金 ${yen(changed[k])} → ${yen(cur[k] || 0)}`).join('\n');
+      const lines = Object.keys(changed).sort().map((k) => `${YM.y(k)}年${YM.m(k)}月：${miscText(changed[k])} → ${miscText(cur[k] || 0)}`).join('\n');
       add(noticeCard('est', 'var(--est)', 'alert', '内訳を再計算しました', `${lines}\n過去の記録が追加されたため、再計算しました。`, '確認済みにする', () => { repo.acknowledgeUnrecordedChanges(); render(); }));
     }
 
@@ -786,6 +812,8 @@
     sm.append(h('div', { class: 'divider', style: 'margin:14px 0 12px' }));
     const stat = (l, v, pv, color) => h('div', { style: 'flex:1' }, txt(l, 't13 t-sub'), money(v, 22, color), txt(`前${unit}比 ${signed(v - pv)}`, 't12 t-sub'));
     sm.append(h('div', { style: 'display:flex' }, stat('収入', b.income, prev.income, 'var(--income)'), stat('支出', b.expense, prev.expense, 'var(--text)')));
+    // 支出の分け方：固定費（繰り返し・カードの定期のもの）と変動費（それ以外・雑費）
+    sm.append(txt(`支出のうち 固定費 ${yen(b.fixedExpense)}・変動費 ${yen(b.variableExpense)}`, 'note', 'padding-top:10px'));
     if (b.scheduledIncome > 0 || b.scheduledExpense > 0) sm.append(txt(`うち明日以降の予定：収入 ${yen(b.scheduledIncome)}・支出 ${yen(b.scheduledExpense)}`, 'note', 'padding-top:10px'));
     add(sm);
 
@@ -798,9 +826,42 @@
       gc.append(netBars(months.map((m) => `${YM.m(m)}月`), per.map((x) => x.income), per.map((x) => x.expense)));
       add(gc);
     }
-    renderBreakdownItems('支出の内訳', b.expenseItems, b.expense);
+    renderBreakdownItems('固定費', b.expenseItems.filter((x) => x.fixed), b.expense, '繰り返しの支出や、カードの請求に入っている定期のものが入ります。');
+    renderBreakdownItems('変動費', b.expenseItems.filter((x) => !x.fixed), b.expense);
+    renderMisc();
     renderBreakdownItems('収入の内訳', b.incomeItems, b.income);
-    add(txt('「記録外の出金」「記録外の入金」は、残高を確かめたときに、記録した入出金では説明できない差額です。差が出た置き場所（財布・銀行など）ごとに分けています。いつ動いたかまでは分からないため、後で確かめた日の月に入れます。過去の記録を追加すると計算し直します。', 'note', 'padding-left:4px'));
+    add(txt('「雑費」「雑収入」は、残高を確かめたときに、記録した入出金では説明できない差額です（その月の全部の置き場所の合計がプラスなら雑費、マイナスなら雑収入）。いつ動いたかまでは分からないため、後で確かめた日の月に入れます。月ごとに区切りたいときは、月末か月初に残高を確かめてください。過去の記録を追加すると計算し直します。', 'note', 'padding-left:4px'));
+  }
+
+  /** 記録外の差の値を、雑費・雑収入の呼び方で（知らせの表示用）。 */
+  const miscText = (v) => (v > 0 ? `雑費 ${yen(v)}` : v < 0 ? `雑収入 ${yen(-v)}` : '0円');
+
+  /**
+   * 雑費の内訳（計算には使わない）。月の画面では足したり直したりでき、年の画面では名前ごとの合計を見る。
+   * 「分かっている額／分からない額」を帯で見せる（把握率の%は出さない）。
+   */
+  function renderMisc() {
+    const v = st.bdYearMode ? BreakdownLogic.miscRange(repo.data, D.of(st.bdYear, 1, 1), D.of(st.bdYear, 12, 31)) : BreakdownLogic.miscMonth(repo.data, st.bdMonth);
+    if (v.misc === 0 && !v.lines.length) return;
+    const month = st.bdMonth;
+    add(st.bdYearMode ? header(`雑費の内訳（${st.bdYear}年）`) : header('雑費の内訳', '＋足す', () => miscItem(month, null)));
+    const c = card();
+    c.append(h('div', { style: 'display:flex;align-items:center' }, h('div', { style: 'flex:1' }, '雑費'), h('span', { class: 'b' }, yen(v.misc))));
+    if (v.misc > 0) { c.append(h('div', { style: 'height:6px' })); c.append(meter(Math.min(1, Math.max(0, v.known / v.misc)), `雑費のうち分かっている額 ${yen(v.known)}`)); }
+    c.append(txt(v.unknown < 0 ? `内訳が雑費より ${yen(-v.unknown)} 多くなっています（記録していない入金・出金がありませんか）` : `分かっている額 ${yen(v.known)}・分からない額 ${yen(v.unknown)}`,
+      'note', v.unknown < 0 ? 'color:var(--est)' : null));
+    if (st.bdYearMode) {
+      [...K.groupBy(v.lines.filter((l) => l.amount != null), (l) => l.item.name)].map(([n, l]) => [n, sum(l, (x) => x.amount)])
+        .sort((a, b) => b[1] - a[1]).forEach(([n, x]) => { c.append(divider()); c.append(row(n, yen(x))); });
+    } else {
+      if (!v.lines.length) c.append(txt('「1日500円×30日で交通費」「残りは食費」のように、見積もりで中身を書けます。日付は要りません。', 't13 t-sub', 'padding-top:6px'));
+      for (const l of v.lines) {
+        c.append(divider());
+        const at = l.item.rest ? `${yen(l.amount || 0)}（残り全部）` : l.amount != null ? yen(l.amount) : '金額なし';
+        c.append(row(l.item.name, at, { sub: l.item.memo || null, onClick: () => miscItem(month, l.item) }));
+      }
+    }
+    add(c);
   }
 
   /** レポートを組み立てて、印刷の画面を開く（iPhoneでは共有から「PDFとして保存」・「"ファイル"に保存」ができる）。 */
@@ -823,10 +884,10 @@
     setTimeout(() => window.print(), 50);
   }
 
-  function renderBreakdownItems(title, items, total) {
-    add(header(title));
+  function renderBreakdownItems(title, items, total, emptyText = 'この期間の記録はありません。') {
+    add(header(items.length ? `${title}　${yen(sum(items, (x) => x.amount))}` : title));
     const c = card();
-    if (!items.length) c.append(txt('この期間の記録はありません。', 't14 t-sub'));
+    if (!items.length) c.append(txt(emptyText, 't14 t-sub'));
     const max = Math.max(1, ...items.map((x) => x.amount));
     items.forEach((it, i) => {
       if (i > 0) c.append(h('div', { style: 'height:10px' }));
@@ -900,11 +961,13 @@
     recurring.slice().sort((a, b) => K.repeatEvery(a) - K.repeatEvery(b) || D.d(a.date) - D.d(b.date)).forEach((e, i) => {
       if (i > 0) rc.append(divider());
       const acc = data.accounts.find((a) => a.id === e.accountId);
-      const next = BC.expand(e, D.plusDays(t, 1), D.plusMonths(t, 13), !!(acc && noBankDays(acc)))[0];
+      const next = BC.expand(e, D.plusDays(t, 1), D.plusMonths(t, 13), !!e.cardId || !!(acc && noBankDays(acc)), true)[0];
       const left = loans.has(e.id) ? `・残り${loans.get(e.id).remainingCount}回` : e.endDate == null ? '' : '・終了';
       const inc = e.kind === INCOME;
-      rc.append(row(e.name, (inc ? '＋' : '−') + yen(e.amount), { rightColor: inc ? 'var(--income)' : 'var(--text)',
-        sub: K.repeatLabel(e) + (next ? `・次回 ${md(next.date)}` : '') + left + `・${accName(e.accountId)}`, onClick: () => editEntry(e, e.kind) }));
+      const pc = e.cardId ? data.cards.find((c) => c.id === e.cardId) : null;
+      const payName = e.cardId ? 'カード：' + (pc ? pc.name : '削除したカード') : accName(e.accountId);
+      rc.append(row(e.name, e.slot ? '金額は都度' : (inc ? '＋' : '−') + yen(e.amount), { rightColor: inc ? 'var(--income)' : e.slot ? 'var(--sub)' : 'var(--text)',
+        sub: K.repeatLabel(e) + (next ? `・次回 ${md(next.date)}` : '') + left + `・${payName}`, onClick: () => editEntry(e, e.kind) }));
     });
     add(rc);
 
@@ -955,7 +1018,7 @@
     return CsvFormat.export(repo.data, `${APP_VERSION}（${PLATFORM}）`, today(), BC.summarize(repo.data, today(), 12).timeline);
   }
   function shareCsv() {
-    confirm('CSVを送りますか？', 'CSVには、口座の残高・収入（給与など）・支払いの予定が入っています。送り先を確かめてから送ってください。\n控えを残すときは「\"ファイル\"に保存」を選びます。', '送る・保存', async () => {
+    confirm('CSVを送りますか？', 'CSVには、口座の残高・収入（給与など）・支出の予定・雑費の内訳とメモが入っています。送り先を確かめてから送ってください。\n控えを残すときは「\"ファイル\"に保存」を選びます。', '送る・保存', async () => {
       const csv = buildCsv();
       if (csv == null) return;
       const name = `家計簿_${today()}.csv`;
@@ -1022,7 +1085,7 @@
     const item = (ic, title, sub, f) => body.append(h('button', { class: 'choice', type: 'button', onclick: () => { sheet.close(); f(); } },
       div('ic', icon(ic, 22)), div('', div('ttl', title), div('s', sub))));
     item('in', '収入', '給与・副業・給付金・返金など（確定した金額と入金日）', () => income(null));
-    item('out', '支出', '引き落とし・振込・現金での支払いなど（確定した金額と日付）', () => debit(null));
+    item('out', '支出', '引き落とし・振込・現金での支払い、毎月の水道・電気代やカードで払うサブスクなど', () => debit(null));
     item('card', 'カードの請求', '確定した請求額（引き落とし日は自動計算）', () => bill(null, null));
     item('plus', 'チャージ', '電子マネー・交通系ICへの入金（支出に二重計上しません）', charge);
     item('wallet', '預け入れ・引き出し', '銀行と現金の間のお金の移動（収入・支出に数えません）', transfer);
@@ -1033,6 +1096,22 @@
 
   const isCashAccount = (id) => { const a = repo.data.accounts.find((x) => x.id === id); return !!(a && a.isCash); };
   const isNoShiftAccount = (id) => { const a = repo.data.accounts.find((x) => x.id === id); return !!(a && noBankDays(a)); };
+
+  /** 支出の支払元のチップ（口座の後にカード）。pay = { accountId, cardId }。カードは使っているもの（と、今選ばれているもの）だけ。 */
+  function payChips(accounts, pay, allowCards, onPick) {
+    const box = div('');
+    const draw = () => {
+      box.textContent = '';
+      const cards = allowCards() ? repo.data.cards.filter((c) => !c.retired || c.id === pay.cardId) : [];
+      box.append(chipRow([
+        ...accounts.map((a) => chip(a.name, !pay.cardId && a.id === pay.accountId, () => { pay.cardId = null; pay.accountId = a.id; onPick(); draw(); })),
+        ...cards.map((c) => chip(`カード：${c.name}`, pay.cardId === c.id, () => { pay.cardId = c.id; onPick(); draw(); })),
+      ]));
+    };
+    draw();
+    return box;
+  }
+  const CARD_PAY_NOTE = 'カードで払うものは、カードの請求でまとめて引かれるので、残高の計算には入れません。請求額を入れるときに、内訳（固定費）として確かめます。';
 
   /** 口座を選ぶチップの列。 */
   function accountChips(accounts, selected, onPick) {
@@ -1061,7 +1140,7 @@
 
   function save(e, lbl) {
     const okk = repo.upsertEntry(e, lbl);
-    if (okk) { toast(`記録しました：${e.name} ${yen(e.amount)}（${ymd(e.date)}）`); render(); } else toast('保存できませんでした');
+    if (okk) { toast(`記録しました：${e.name} ${e.slot ? '（金額は確定したら入れます）' : yen(e.amount)}（${ymd(e.date)}）`); render(); } else toast('保存できませんでした');
     return okk;
   }
 
@@ -1352,20 +1431,32 @@
   function debit(e) {
     const accounts = repo.data.accounts, t = today();
     if (!accounts.length) { toast('先に「口座」タブで口座を追加してください'); return; }
-    let accountId = e ? e.accountId : (accounts.find((a) => a.isDebit) || accounts[0]).id;
+    const pay = { accountId: e && e.accountId ? e.accountId : (accounts.find((a) => a.isDebit) || accounts[0]).id, cardId: e ? e.cardId || null : null };
     const body = div('form');
-    const amount = amountField(e && e.amount);
+    const amount = amountField(e && !e.slot ? e.amount : null);
+    const amountLabel = label('金額（円）');
     const name = input('例：電気代', e ? e.name : '');
-    const db = dateBlock(e ? e.date : t, EXPENSE, () => isNoShiftAccount(accountId));
-    body.append(label('金額（円）'), amount, label('引き落とし日'), db.view, label('支払元'), accountChips(accounts, () => accountId, (id) => { accountId = id; db.refresh(); }), label('名前'), name);
-    const rs = repeatSection(db.field, e, false);
+    const db = dateBlock(e ? e.date : t, EXPENSE, () => !!pay.cardId || isNoShiftAccount(pay.accountId));
+    const dateLabel = label('引き落とし日');
+    const cardNote = txt(CARD_PAY_NOTE, 'note');
+    const onPay = () => {
+      db.refresh();
+      dateLabel.textContent = pay.cardId ? 'カードで払う日（繰り返す場合は初回）' : '引き落とし日';
+      cardNote.style.display = pay.cardId ? '' : 'none';
+    };
+    body.append(amountLabel, amount, dateLabel, db.view, label('支払元'), payChips(accounts, pay, () => true, onPay), cardNote, label('名前'), name);
+    const rs = repeatSection(db.field, e, false, true, (slot) => { amountLabel.style.display = amount.style.display = slot ? 'none' : ''; });
     body.append(rs.el);
+    onPay();
     openSheet({ title: e ? '支出を編集' : '支出', body, saveLabel: '記録する', keyboard: true, neutral: e ? ['削除', () => confirmDelete(e)] : null,
       onSave: (close) => {
         const v = parseYen(amount.value), dd = db.field.value, n = name.value.trim() || '引き落とし';
-        if (v == null || v <= 0) { toast('金額を入力してください'); return false; }
+        const slot = rs.slot();
+        if (!slot && (v == null || v <= 0)) { toast('金額を入力してください'); return false; }
         if (!D.valid(dd)) { toast('日付を選んでください'); return false; }
-        const ne = rs.apply({ id: e ? e.id : newId(), name: n, amount: v, date: dd, kind: EXPENSE, accountId, repeatMonthly: false, endDate: null, lastAmount: null, chargeFrom: null, changes: e ? e.changes || [] : [] });
+        if (pay.cardId && !rs.repeating()) { toast('カードで払うものは、繰り返しの予定として登録してください（1回の買い物はカードの請求額に含まれます）'); return false; }
+        const ne = rs.apply({ id: e ? e.id : newId(), name: n, amount: slot ? 0 : v, date: dd, kind: EXPENSE, accountId: pay.cardId ? '' : pay.accountId, repeatMonthly: false, endDate: null, lastAmount: null,
+          chargeFrom: null, changes: e ? e.changes || [] : [], cardId: pay.cardId || null });
         return ne ? saveOrReplace(ne, !e, '引き落とし：', close) : false;
       } });
   }
@@ -1397,6 +1488,35 @@
     const showFail = () => { failFields.style.display = failToggle.input.checked ? '' : 'none'; };
     failToggle.input.addEventListener('change', showFail);
     failBox.append(failToggle.el, failFields);
+    // この請求に入っている、カードで払う定期のもの（締め日から推した候補。本人がチェックしたものだけ内訳にする）
+    const itemsBox = div('');
+    let itemRows = [];
+    const drawItems = () => {
+      itemsBox.textContent = '';
+      const done = CardLogic.confirmedBill(repo.data, cd, raw);
+      const rows = [];
+      const seenIds = new Set();
+      for (const o of CardLogic.billCandidates(repo.data, cd, raw)) {
+        if (seenIds.has(o.entryId)) continue;
+        seenIds.add(o.entryId);
+        const saved = done && (done.items || []).find((x) => x.entryId === o.entryId);
+        rows.push({ entryId: o.entryId, name: o.name, amount: saved ? saved.amount : o.pending ? null : o.amount });
+      }
+      for (const x of (done && done.items) || []) if (!x.entryId || !seenIds.has(x.entryId)) rows.push({ entryId: x.entryId, name: x.name, amount: x.amount });
+      itemRows = rows.map((r) => {
+        const en = repo.data.entries.find((x) => x.id === r.entryId);
+        const prev = en && en.slot ? SlotLogic.previousAmount(repo.data, en, raw) : null;
+        const checked = !done || (done.items || []).some((x) => (r.entryId ? x.entryId === r.entryId : x.name === r.name));
+        const tg = toggle(r.name, checked);
+        const f = numberInput(prev != null ? `前回 ${num(prev)}` : '金額', r.amount == null ? '' : String(r.amount));
+        return { ...r, toggle: tg, field: f };
+      });
+      itemsBox.style.display = itemRows.length ? '' : 'none';
+      if (!itemRows.length) return;
+      itemsBox.append(label('この請求に入っている定期のもの'));
+      for (const r of itemRows) itemsBox.append(r.toggle.el, h('div', { style: 'display:flex;align-items:center;gap:6px;padding:0 0 6px' }, r.field, h('span', { class: 't14 t-sub' }, '円')));
+      itemsBox.append(txt('明細で確かめて、入っているものだけをオンにしてください。オンにしたものは、この請求の内訳（固定費）になります。残高の計算は変わりません。', 'note'));
+    };
     const rebuild = () => {
       cardRow.textContent = '';
       if (cards.length > 1) cardRow.append(chipRow(cards.map((x) => chip(x.name, x.id === cd.id, () => { cd = x; raw = firstUnconfirmed(x); amount.value = (CardLogic.confirmedBill(data, cd, raw) || {}).amount ?? ''; rebuild(); }))));
@@ -1420,11 +1540,12 @@
       failToggle.input.checked = !!(done && done.payOn);
       failDate.value = (done && done.payOn) || D.max(t, D.plusDays(CardLogic.payDay(raw), 1));
       showFail();
+      drawItems();
     };
     rebuild();
     body.append(label('確定した請求額（円）'), amount);
     if (cards.length > 1) body.append(label('カード'), cardRow);
-    body.append(payLabel, payRow, info, failBox);
+    body.append(payLabel, payRow, info, itemsBox, failBox);
     openSheet({ title: 'カードの請求', body, saveLabel: '記録する', keyboard: true,
       neutral: CardLogic.confirmedBill(data, cd, raw) ? ['この請求を削除', () => {
         if (!CardLogic.confirmedBill(repo.data, cd, raw)) { toast('この請求はまだ確定していません'); return; }
@@ -1439,7 +1560,17 @@
         const failed = failBox.style.display !== 'none' && failToggle.input.checked;
         if (failed && !D.valid(failDate.value)) { toast('実際に払う日を選んでください'); return false; }
         const payOn = failed ? failDate.value : null;
-        const okk = repo.setBill(cd, raw, v, t, payOn);
+        let items = null;
+        if (itemRows.length) {
+          items = [];
+          for (const r of itemRows.filter((x) => x.toggle.input.checked)) {
+            const x = parseYen(r.field.value);
+            if (x == null || x < 0) { toast(`「${r.name}」の金額を入れてください（入っていなければオフにしてください）`); return false; }
+            items.push({ entryId: r.entryId, name: r.name, amount: x });
+          }
+          if (sum(items, (x) => x.amount) > v) { toast('定期のものの合計が、請求額より多くなっています'); return false; }
+        }
+        const okk = repo.setBill(cd, raw, v, t, payOn, items);
         if (okk) { toast(payOn ? `記録しました：${cd.name}の請求 ${yen(v)} を ${md(payOn)}に払う` : `記録しました：${cd.name} ${md(CardLogic.payDay(raw))}引き落とし ${yen(v)}`); render(); } else toast('保存できませんでした');
         return okk;
       } });
@@ -1584,7 +1715,7 @@
 
   function correctBalance(acc, onDone) {
     const body = div('form');
-    body.append(txt(`${ymd(acc.asOf)}時点の残高として記録した ${yen(acc.balance)} を、正しい金額に直します。日付は変わりません。記録外の入出金も計算し直されます。`, 't13 t-sub', 'padding-top:12px'));
+    body.append(txt(`${ymd(acc.asOf)}時点の残高として記録した ${yen(acc.balance)} を、正しい金額に直します。日付は変わりません。雑費・雑収入も計算し直されます。`, 't13 t-sub', 'padding-top:12px'));
     const si = signedInput('正しい金額（円）');
     body.append(label('正しい金額（円）'), si.el);
     if (acc.isCash) body.append(btn('枚数で数える', 'text', () => countCash((v) => { si.input.value = String(v); })));
@@ -1723,8 +1854,12 @@
   }
 
   /** 「繰り返す」と、オンのときだけ出る詳細（間隔・回数・最終回の日付・最終回の金額）。 */
-  function repeatSection(dateField, e, defaultOn) {
+  function repeatSection(dateField, e, defaultOn, allowSlot = false, onSlot = () => {}) {
     const rep = toggle('繰り返す', e ? e.repeatMonthly : defaultOn);
+    // 枠：金額は毎回ちがい、確定したら入れる（水道・電気・通信費など）
+    const slotT = toggle('金額は毎回ちがう（確定したら入れる）', !!(e && e.slot));
+    const slotHint = txt('水道・電気・通信費など。その回の金額が分かったら入れます。入れるまでは「金額待ち」として、残高の計算に入れません。', 't12 t-sub');
+    const lastLabel = label('最終回の金額（異なる場合のみ）');
     let every = e ? K.repeatEvery(e) : 1;
     const box = div('');
     const everyRow = div('');
@@ -1743,8 +1878,9 @@
       const d = D.valid(dateField.value) ? dateField.value : null;
       hint.textContent = !d ? '' : every === 1 ? `毎月${D.d(d)}日に繰り返します。` : every === 12 ? `毎年${D.m(d)}月${D.d(d)}日に繰り返します（自動車税・保険の年払いなど）。` : `${K.everyLabel(every)}、${D.d(d)}日に繰り返します（開始日の月から数えます）。`;
     };
+    if (allowSlot) box.append(slotT.el, slotHint);
     box.append(label('間隔'), everyRow, hint, label('繰り返す回数（開始日を含む）'), count,
-      label('または、最終回の日付'), endField, clearEnd, label('最終回の金額（異なる場合のみ）'), lastAmount, preview);
+      label('または、最終回の日付'), endField, clearEnd, lastLabel, lastAmount, preview);
     const updatePreview = () => {
       const start = dateField.value, end = endField.value;
       preview.textContent = !D.valid(start) ? '' : !D.valid(end) ? '最終回：なし（無期限）' : end < start ? '⚠ 最終回が開始日より前です' : `最終回：${ymd(end)}（全${countOf(start, end)}回）`;
@@ -1771,19 +1907,29 @@
     dateField.addEventListener('change', onStart);
     dateField.addEventListener('input', onStart);
     if (e && e.endDate) count.value = String(countOf(e.date, e.endDate));
-    const show = () => { box.style.display = rep.input.checked ? '' : 'none'; };
+    const isSlot = () => allowSlot && rep.input.checked && slotT.input.checked;
+    const show = () => {
+      box.style.display = rep.input.checked ? '' : 'none';
+      // 枠のときは最終回の金額も使わない
+      lastLabel.style.display = lastAmount.style.display = isSlot() ? 'none' : '';
+      onSlot(isSlot());
+    };
     rep.input.addEventListener('change', show);
+    slotT.input.addEventListener('change', show);
     drawEvery(); show(); updatePreview();
     return {
       el: div('', rep.el, box),
+      slot: isSlot,
+      repeating: () => rep.input.checked,
       apply(base) {
-        if (!rep.input.checked) return { ...base, repeatMonthly: false, repeatEvery: 1, endDate: null, lastAmount: null };
+        if (!rep.input.checked) return { ...base, repeatMonthly: false, repeatEvery: 1, endDate: null, lastAmount: null, slot: false };
         const end = endField.value || null;
         const lt = lastAmount.value.trim(), last = parseYen(lt);
         if (end && !D.valid(end)) { toast('最終回の日付を選び直してください'); return null; }
         if (end && end < base.date) { toast('最終回が開始日より前です'); return null; }
+        if (isSlot()) return { ...base, repeatMonthly: true, repeatEvery: every, endDate: end, lastAmount: null, slot: true, amount: 0 };
         if (lt && (last == null || last <= 0)) { toast('最終回の金額を数字で入力してください'); return null; }
-        return { ...base, repeatMonthly: true, repeatEvery: every, endDate: end, lastAmount: end ? last : null };
+        return { ...base, repeatMonthly: true, repeatEvery: every, endDate: end, lastAmount: end ? last : null, slot: false };
       },
     };
   }
@@ -1804,7 +1950,7 @@
     const cur = (e.changes || []).find((c) => c.originalDate === originalDate);
     const base = cur && cur.amount != null ? cur.amount : nomAmount;   // この回に払う予定の額
     const body = div('form');
-    body.append(txt(`予定どおりなら ${ymd(nomDate)}・${yen(nomAmount)}`, 't13 t-sub', 'padding-top:12px'));
+    body.append(txt(e.slot ? `金額は確定したら入れる枠です（予定の日付 ${ymd(nomDate)}）` : `予定どおりなら ${ymd(nomDate)}・${yen(nomAmount)}`, 't13 t-sub', 'padding-top:12px'));
     // 何をするか：日付・金額を変える／一部だけ払った（残りを次の回へ）／この回は無し
     const MODES = ['日付・金額を変える', '一部だけ払った', 'この回は無し'];
     let mode = cur && cur.skipped ? 2 : 0;
@@ -1843,7 +1989,7 @@
     drawTargets(); updatePartial(); draw();
     body.append(label('この回をどうしますか'), modeRow, changeBox, partialBox, skipBox);
     openSheet({ title: 'この回だけ変更', body,
-      neutral: cur ? ['予定どおりに戻す', () => { if (repo.setOccurrenceChange(e.id, originalDate, null)) { toast('予定どおりに戻しました'); render(); } else toast('保存できませんでした'); }] : null,
+      neutral: cur ? [e.slot ? '金額待ちに戻す' : '予定どおりに戻す', () => { if (repo.setOccurrenceChange(e.id, originalDate, null)) { toast(e.slot ? '金額待ちに戻しました' : '予定どおりに戻しました'); render(); } else toast('保存できませんでした'); }] : null,
       onSave: () => {
         if (mode === 1) {
           const v = parseYen(paid.value);
@@ -1864,7 +2010,8 @@
           const v = parseYen(amount.value), dd = dateF.value;
           if (v == null || v <= 0) { toast('金額を入力してください'); return false; }
           if (!D.valid(dd)) { toast('日付を選んでください'); return false; }
-          change = dd === nomDate && v === nomAmount ? null : { originalDate, date: dd === nomDate ? null : dd, amount: v === nomAmount ? null : v, skipped: false };
+          change = e.slot ? { originalDate, date: dd === nomDate ? null : dd, amount: v, skipped: false }
+            : dd === nomDate && v === nomAmount ? null : { originalDate, date: dd === nomDate ? null : dd, amount: v === nomAmount ? null : v, skipped: false };
         }
         const okk = repo.setOccurrenceChange(e.id, originalDate, change);
         if (okk) { toast(change == null ? '予定どおりに戻しました' : 'この回だけ変更しました'); render(); } else toast('保存できませんでした');
@@ -1876,41 +2023,108 @@
     const accounts = repo.data.accounts;
     if (!accounts.length) { toast('先に口座を追加してください'); return; }
     let kind = e ? e.kind : kindIn;
-    let accountId = e ? e.accountId : (accounts.find((a) => (kind === INCOME ? a.isSalary : a.isDebit)) || accounts[0]).id;
+    const pay = { accountId: e && e.accountId ? e.accountId : (accounts.find((a) => (kind === INCOME ? a.isSalary : a.isDebit)) || accounts[0]).id, cardId: e ? e.cardId || null : null };
     const body = div('form', h('div', { style: 'height:12px' }));
     const kindRow = div(''), accRow = div('');
     const name = input('例：奨学金、家賃', e ? e.name : '');
-    const amount = numberInput('円', e ? String(e.amount) : '');
+    const amount = numberInput('円', e && !e.slot ? String(e.amount) : '');
+    const amountLabel = label('金額');
     const dateF = dateInput(e ? e.date : today());
-    const drawAcc = () => { accRow.textContent = ''; accRow.append(accountChips(accounts, () => accountId, (id) => { accountId = id; })); };
+    const cardNote = txt(CARD_PAY_NOTE, 'note');
+    // 振替（チャージ・預け入れ・引き出し）はカードを選ばせない
+    const cardsOk = () => kind === EXPENSE && !(e && e.chargeFrom);
+    const showCardNote = () => { cardNote.style.display = pay.cardId ? '' : 'none'; };
+    const drawAcc = () => { accRow.textContent = ''; accRow.append(payChips(accounts, pay, cardsOk, showCardNote)); showCardNote(); };
     const rebuildKind = () => {
       kindRow.textContent = '';
       kindRow.append(chipRow([
-        chip('出金（引き落とし）', kind === EXPENSE, () => { kind = EXPENSE; if (!e) accountId = (accounts.find((a) => a.isDebit) || accounts[0]).id; rebuildKind(); drawAcc(); }),
-        chip('入金', kind === INCOME, () => { kind = INCOME; if (!e) accountId = (accounts.find((a) => a.isSalary) || accounts[0]).id; rebuildKind(); drawAcc(); }),
+        chip('出金（引き落とし）', kind === EXPENSE, () => { kind = EXPENSE; pay.cardId = null; if (!e) pay.accountId = (accounts.find((a) => a.isDebit) || accounts[0]).id; rebuildKind(); drawAcc(); }),
+        chip('入金', kind === INCOME, () => { kind = INCOME; pay.cardId = null; if (!e) pay.accountId = (accounts.find((a) => a.isSalary) || accounts[0]).id; rebuildKind(); drawAcc(); }),
       ]));
     };
     rebuildKind(); drawAcc();
-    const rs = repeatSection(dateF, e, !e);
-    body.append(kindRow, label('名前'), name, label('金額'), amount, label('日付（繰り返す場合は初回）'), dateF, label('口座'), accRow, rs.el,
+    const rs = repeatSection(dateF, e, !e, !(e && e.chargeFrom), (slot) => { amountLabel.style.display = amount.style.display = slot ? 'none' : ''; });
+    body.append(kindRow, label('名前'), name, amountLabel, amount, label('日付（繰り返す場合は初回）'), dateF, label('支払元・入金先'), accRow, cardNote, rs.el,
       txt('土日・祝日や年末年始に当たる場合、引き落としは次の営業日、入金は前の営業日として計算します。', 'note'));
     openSheet({ title: splitFrom ? `${md(e.date)}の回以降を変更` : e ? '予定を編集' : '予定を追加', body,
       neutral: e && !splitFrom ? ['削除', () => confirmDelete(e)] : null,
       onSave: () => {
         const n = name.value.trim(), v = parseYen(amount.value), date = dateF.value;
+        const slot = rs.slot() && kind === EXPENSE;
+        const cardId = cardsOk() ? pay.cardId : null;
         if (!n) { toast('名前を入力してください'); return false; }
-        if (v == null || v <= 0) { toast('金額を1円以上の数字で入力してください'); return false; }
+        if (!slot && (v == null || v <= 0)) { toast('金額を1円以上の数字で入力してください'); return false; }
         if (!D.valid(date)) { toast('日付を選んでください'); return false; }
+        if (cardId && !rs.repeating()) { toast('カードで払うものは、繰り返しの予定として登録してください（1回の買い物はカードの請求額に含まれます）'); return false; }
         // 振替の払い元と「この回だけ」の変更は引き継ぐ（編集で消さない）
-        const ne = rs.apply({ id: e ? e.id : newId(), name: n, amount: v, date, kind, accountId, repeatMonthly: false, endDate: null, lastAmount: null,
-          chargeFrom: e ? e.chargeFrom : null, changes: e ? e.changes || [] : [] });
-        if (!ne) return false;
+        const applied = rs.apply({ id: e ? e.id : newId(), name: n, amount: slot ? 0 : v, date, kind, accountId: cardId ? '' : pay.accountId, repeatMonthly: false, endDate: null, lastAmount: null,
+          chargeFrom: e ? e.chargeFrom : null, changes: e ? e.changes || [] : [], cardId: cardId || null });
+        if (!applied) return false;
+        const ne = { ...applied, slot: !!applied.slot && kind === EXPENSE };
         if (splitFrom) {
           const okk = repo.splitSeries(splitFrom, e.date, ne);
           if (okk) { toast(`${md(e.date)}の回以降を変更しました`); render(); } else toast('保存できませんでした');
           return okk;
         }
         return save(ne, '予定：');
+      } });
+  }
+
+  // ===================================================================
+  // 枠の、その回の金額を入れる
+  // ===================================================================
+  function slotAmount(e, originalDate) {
+    const nomDate = BC.nominal(e, originalDate, isNoShiftAccount(e.accountId))[0];
+    const prev = SlotLogic.previousAmount(repo.data, e, originalDate);
+    const body = div('form');
+    const amount = amountField(null);
+    if (prev != null) amount.placeholder = num(prev);
+    body.append(txt(`${ymd(nomDate)}・${accName(e.accountId)}`, 't13 t-sub', 'padding-top:12px'), label('確定した金額（円）'), amount,
+      txt(prev != null ? `前回は ${yen(prev)} でした（参考。計算には使いません）` : '明細・検針票・引き落としの記録で確かめた金額を入れてください。', 'note'));
+    openSheet({ title: `${e.name}の金額`, body, saveLabel: '記録する', keyboard: true,
+      neutral: ['この回は無し', () => {
+        if (repo.setOccurrenceChange(e.id, originalDate, { originalDate, date: null, amount: null, skipped: true })) { toast('この回は無しにしました'); render(); } else toast('保存できませんでした');
+      }],
+      onSave: () => {
+        const v = parseYen(amount.value);
+        if (v == null || v <= 0) { toast('金額を入力してください'); return false; }
+        const old = (e.changes || []).find((c) => c.originalDate === originalDate);
+        const okk = repo.setOccurrenceChange(e.id, originalDate, { originalDate, date: old && old.date ? old.date : null, amount: v, skipped: false });
+        if (okk) { toast(`記録しました：${e.name} ${yen(v)}`); render(); } else toast('保存できませんでした');
+        return okk;
+      } });
+  }
+
+  // ===================================================================
+  // 雑費の内訳（計算には使わない）
+  // ===================================================================
+  function miscItem(month, item) {
+    const body = div('form', h('div', { style: 'height:12px' }));
+    const name = input('例：交通費', item ? item.name : '');
+    const amount = amountField(item ? item.amount : null);
+    const amountLabel = label('金額（円・見積もりでよい。メモだけなら空欄）');
+    const restT = toggle('残り全部（雑費からほかの行を引いた額）', !!(item && item.rest));
+    const memo = input('例：ICOCAで遠出、飲み会2回（なくてもよい）', item ? item.memo : '');
+    const showAmount = () => { amountLabel.style.display = amount.style.display = restT.input.checked ? 'none' : ''; };
+    restT.input.addEventListener('change', showAmount);
+    // 前に使った名前を候補に出す（費目の一覧は作らない）
+    const counts = new Map();
+    for (const x of repo.data.miscItems || []) counts.set(x.name, (counts.get(x.name) || 0) + 1);
+    const names = [...counts].sort((a, b) => b[1] - a[1]).map(([n]) => n).filter((n) => !item || n !== item.name).slice(0, 8);
+    body.append(label('名前'), name);
+    if (names.length) body.append(chipRow(names.map((n) => chip(n, false, () => { name.value = n; }))));
+    body.append(amountLabel, amount, restT.el, label('メモ'), memo, txt(`${YM.m(month)}月の雑費の中身の目安です。残高や見通しの計算には使いません。`, 'note'));
+    showAmount();
+    openSheet({ title: item ? '雑費の内訳を編集' : `${YM.m(month)}月の雑費に内訳を足す`, body,
+      neutral: item ? ['削除', () => { if (repo.deleteMiscItem(item.id)) render(); else toast('保存できませんでした'); }] : null,
+      onSave: () => {
+        const n = name.value.trim(), tx = amount.value.trim();
+        const v = restT.input.checked || !tx ? null : parseYen(tx);
+        if (!n) { toast('名前を入力してください'); return false; }
+        if (!restT.input.checked && tx && (v == null || v < 0)) { toast('金額を数字で入力してください'); return false; }
+        const okk = repo.upsertMiscItem({ id: item ? item.id : newId(), month, name: n, amount: v, memo: memo.value.trim(), rest: restT.input.checked });
+        if (okk) render(); else toast('保存できませんでした');
+        return okk;
       } });
   }
 

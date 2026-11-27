@@ -1,7 +1,7 @@
 /*
  * 家計簿 iPhone版：データ（保存・変更・CSV）。Android版 data/*.kt を移したもの。
  * 保存先は端末のブラウザの保存領域（localStorage）だけ。外には送らない。
- * 保存データの形（版8）と CSV（形式2）は Android版と同じ。
+ * 保存データの形（版12）と CSV（形式3）は Android版と同じ。
  */
 (function (K) {
   'use strict';
@@ -15,15 +15,15 @@
   const now = () => { const t = new Date(); const p = (n) => String(n).padStart(2, '0');
     return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}`; };
 
-  const emptyData = () => ({ accounts: [], entries: [], cards: [], bills: [], snapshots: [], unrecordedSeen: {}, history: [], legacy: null });
+  const emptyData = () => ({ accounts: [], entries: [], cards: [], bills: [], snapshots: [], unrecordedSeen: {}, history: [], miscItems: [], legacy: null });
 
   // ===================================================================
   // 保存（正本）：localStorage の1つのキーに JSON
   // ===================================================================
   const KEY = 'kakeibo.budget';
   const BudgetStore = {
-    /** 1〜3=Android v0.1〜0.4、4=確定だけ、5=残高の記録、6=電子マネー、7=この回だけの変更、8=請求ごとの口座・使わないカード、9=残高を確かめた順番、10=毎月以外の繰り返し（repeatEvery）、11=引き落とせなかった請求の支払日（payOn）。 */
-    VERSION: 11,
+    /** 1〜3=Android v0.1〜0.4、4=確定だけ、5=残高の記録、6=電子マネー、7=この回だけの変更、8=請求ごとの口座・使わないカード、9=残高を確かめた順番、10=毎月以外の繰り返し（repeatEvery）、11=引き落とせなかった請求の支払日（payOn）、12=枠（slot）・カードで払う定期のもの（cardId）・請求の内訳（items）・雑費の内訳（miscItems）。 */
+    VERSION: 12,
     storage: (() => { try { return window.localStorage; } catch (e) { return null; } })(),
 
     load(today) {
@@ -68,13 +68,15 @@
           isDebit: !!a.isDebit, isSalary: !!a.isSalary, isCash: !!a.isCash, isEmoney: !!a.isEmoney, isIc: !!a.isIc })),
         entries: d.entries.map((e) => ({ id: e.id, name: e.name, amount: e.amount, date: e.date, kind: e.kind,
           accountId: e.accountId, repeatMonthly: !!e.repeatMonthly, repeatEvery: K.repeatEvery(e), endDate: e.endDate ?? null, lastAmount: e.lastAmount ?? null,
-          chargeFrom: e.chargeFrom ?? null,
+          chargeFrom: e.chargeFrom ?? null, slot: !!e.slot, cardId: e.cardId || null,
           changes: (e.changes || []).map((c) => ({ originalDate: c.originalDate, date: c.date ?? null, amount: c.amount ?? null, skipped: !!c.skipped })) })),
         cards: d.cards.map((c) => ({ id: c.id, name: c.name, closingDay: c.closingDay, paymentDay: c.paymentDay, accountId: c.accountId, retired: !!c.retired })),
-        bills: d.bills.map((b) => ({ id: b.id, cardId: b.cardId, paymentDate: b.paymentDate, amount: b.amount, inputDate: b.inputDate, accountId: b.accountId, payOn: b.payOn || null })),
+        bills: d.bills.map((b) => ({ id: b.id, cardId: b.cardId, paymentDate: b.paymentDate, amount: b.amount, inputDate: b.inputDate, accountId: b.accountId, payOn: b.payOn || null,
+          items: (b.items || []).map((x) => ({ entryId: x.entryId, name: x.name, amount: x.amount })) })),
         snapshots: d.snapshots.map((s) => ({ accountId: s.accountId, date: s.date, amount: s.amount, order: s.order ? s.order.slice() : null })),
         unrecordedSeen: { ...(d.unrecordedSeen || {}) },
         history: d.history.map((h) => ({ at: h.at, text: h.text })),
+        miscItems: (d.miscItems || []).map((m) => ({ id: m.id, month: m.month, name: m.name, amount: m.amount ?? null, memo: m.memo || '', rest: !!m.rest })),
         legacy: d.legacy ?? null,
       }, null, 2);
     },
@@ -101,12 +103,15 @@
           // 版9までは無い（毎月）
           repeatEvery: Number.isInteger(o.repeatEvery) && o.repeatEvery >= 1 && o.repeatEvery <= 24 ? o.repeatEvery : 1,
           chargeFrom: o.chargeFrom == null ? null : str(o, 'chargeFrom'),
+          // 版11までは無い（金額の決まった予定・口座から払う）
+          slot: !!o.slot, cardId: o.cardId == null ? null : str(o, 'cardId'),
           changes: (Array.isArray(o.changes) ? o.changes : []).map((c) => ({ originalDate: date(c, 'originalDate'), date: dateOrNull(c, 'date'), amount: numOrNull(c, 'amount'), skipped: !!c.skipped })) };
       });
       const cards = arr('cards').map((o) => ({ id: str(o, 'id'), name: str(o, 'name'), closingDay: num(o, 'closingDay'), paymentDay: num(o, 'paymentDay'), accountId: str(o, 'accountId'), retired: !!o.retired }));
       const cardAccount = new Map(cards.map((c) => [c.id, c.accountId]));
       const bills = arr('bills').map((o) => ({ id: str(o, 'id'), cardId: str(o, 'cardId'), paymentDate: date(o, 'paymentDate'), amount: num(o, 'amount'), inputDate: date(o, 'inputDate'),
         payOn: dateOrNull(o, 'payOn'),   // 版10までは無い
+        items: (Array.isArray(o.items) ? o.items : []).map((x) => ({ entryId: str(x, 'entryId'), name: str(x, 'name'), amount: num(x, 'amount') })),   // 版11までは無い
         accountId: typeof o.accountId === 'string' ? o.accountId : (cardAccount.get(o.cardId) || '') }));
       const snapshots = Array.isArray(root.snapshots)
         ? root.snapshots.map((o) => ({ accountId: str(o, 'accountId'), date: date(o, 'date'), amount: num(o, 'amount'),
@@ -115,7 +120,13 @@
       const unrecordedSeen = {};
       if (root.unrecordedSeen && typeof root.unrecordedSeen === 'object') for (const [k, x] of Object.entries(root.unrecordedSeen)) if (typeof x === 'number') unrecordedSeen[k] = x;
       const history = arr('history').map((o) => ({ at: String(o.at), text: String(o.text) }));
-      return { accounts, entries, cards, bills, snapshots, unrecordedSeen, history, legacy: typeof root.legacy === 'string' ? root.legacy : null };
+      // 版11までは無い
+      const miscItems = arr('miscItems').map((o) => {
+        const month = str(o, 'month');
+        if (!/^\d{4}-\d{2}$/.test(month)) throw new Error(`月「${month}」が読めません`);
+        return { id: str(o, 'id'), month, name: str(o, 'name'), amount: numOrNull(o, 'amount'), memo: typeof o.memo === 'string' ? o.memo : '', rest: !!o.rest };
+      });
+      return { accounts, entries, cards, bills, snapshots, unrecordedSeen, history, miscItems, legacy: typeof root.legacy === 'string' ? root.legacy : null };
     },
 
     legacyCount(legacy) {
@@ -179,7 +190,7 @@
       const changed = BreakdownLogic.changedMonths(this.data);
       if (!Object.keys(changed).length) return true;
       const cur = BreakdownLogic.currentSeen(this.data);
-      const text = '記録外の入出金の変更を確認：' + Object.entries(changed).map(([m, old]) => `${m} ${old}円→${cur[m] || 0}円`).join('、');
+      const text = '記録外の入出金（雑費・雑収入）の変更を確認：' + Object.entries(changed).map(([m, old]) => `${m} ${old}円→${cur[m] || 0}円`).join('、');
       return this.commit({ ...this.data, unrecordedSeen: { ...this.data.unrecordedSeen, ...cur } }, text, false);
     }
 
@@ -314,13 +325,16 @@
       const list = this.data.entries.slice();
       const i = list.findIndex((x) => x.id === e.id);
       if (i >= 0) list[i] = e; else list.push(e);
-      return this.commit({ ...this.data, entries: list }, (i >= 0 ? '変更：' : '') + `${label} ${e.name} ${e.amount}円（${e.date}）`);
+      const amountText = e.slot ? '金額は確定したら入れる' : `${e.amount}円`;
+      const card = e.cardId ? this.data.cards.find((c) => c.id === e.cardId) : null;
+      const payText = e.cardId ? `・${card ? card.name : 'カード'}で払う` : '';
+      return this.commit({ ...this.data, entries: list }, (i >= 0 ? '変更：' : '') + `${label} ${e.name} ${amountText}（${e.date}${payText}）`);
     }
 
     deleteEntry(id) {
       const e = this.data.entries.find((x) => x.id === id);
       if (!e) return false;
-      return this.commit({ ...this.data, entries: this.data.entries.filter((x) => x.id !== id) }, `削除：${e.name} ${e.amount}円（${e.date}）`);
+      return this.commit({ ...this.data, entries: this.data.entries.filter((x) => x.id !== id) }, `削除：${e.name}${e.slot ? '' : ` ${e.amount}円`}（${e.date}）`);
     }
 
     upsertCard(c, today) {
@@ -337,8 +351,9 @@
     deleteCard(id) {
       const c = this.data.cards.find((x) => x.id === id);
       if (!c) return false;
-      return this.data.bills.some((b) => b.cardId === id)
-        ? this.commit({ ...this.data, cards: this.data.cards.map((x) => (x.id === id ? { ...x, retired: true } : x)) }, `カードを使わないにした：${c.name}（過去の請求は残す）`)
+      // カードで払う定期のものが付いているカードも消さない（予定の支払元が分からなくならないように）
+      return this.data.bills.some((b) => b.cardId === id) || this.data.entries.some((e) => e.cardId === id)
+        ? this.commit({ ...this.data, cards: this.data.cards.map((x) => (x.id === id ? { ...x, retired: true } : x)) }, `カードを使わないにした：${c.name}（過去の請求・カードで払う予定は残す）`)
         : this.commit({ ...this.data, cards: this.data.cards.filter((x) => x.id !== id) }, `カードを削除：${c.name}`);
     }
 
@@ -355,11 +370,32 @@
         `毎月の予定を終了：${e.name}（${today}まで。過去の回は残す）`);
     }
 
-    setBill(card, paymentRaw, amount, today, payOn = null) {
+    /** items=null なら内訳はそのまま。 */
+    setBill(card, paymentRaw, amount, today, payOn = null, items = null) {
       const old = CardLogic.confirmedBill(this.data, card, paymentRaw);
       const text = `カードの請求を確定：${card.name} ${paymentRaw}払い ${amount}円` + (old && old.amount !== amount ? `（${old.amount}円から変更）` : '') +
-        (payOn ? `、引き落とせず ${payOn} に払う` : old && old.payOn ? '、予定どおりの引き落としに戻す' : '');
-      return this.commit(CardLogic.setBill(this.data, card, paymentRaw, amount, today, newId(), payOn), text);
+        (payOn ? `、引き落とせず ${payOn} に払う` : old && old.payOn ? '、予定どおりの引き落としに戻す' : '') +
+        (items && items.length ? '、うち定期のもの ' + items.map((x) => `${x.name} ${x.amount}円`).join('・') : '');
+      return this.commit(CardLogic.setBill(this.data, card, paymentRaw, amount, today, newId(), payOn, items), text);
+    }
+
+    // ---- 雑費の内訳（計算には使わない） ----
+
+    /** 雑費の内訳を追加・変更する。「残り全部」はその月に1行だけ（新しく選んだら前の行と置き換える）。 */
+    upsertMiscItem(item) {
+      const list = this.data.miscItems || [];
+      const exists = list.some((x) => x.id === item.id);
+      const others = list.filter((x) => !(x.id === item.id || (item.rest && x.rest && x.month === item.month)));
+      const amountText = item.rest ? '残り全部' : item.amount != null ? `${item.amount}円` : '金額なし';
+      return this.commit({ ...this.data, miscItems: [...others, item] },
+        `${K.YM.y(item.month)}年${K.YM.m(item.month)}月の雑費の内訳を${exists ? '変更' : '追加'}：${item.name} ${amountText}` + (item.memo ? `（${item.memo}）` : ''));
+    }
+
+    deleteMiscItem(id) {
+      const item = (this.data.miscItems || []).find((x) => x.id === id);
+      if (!item) return false;
+      return this.commit({ ...this.data, miscItems: this.data.miscItems.filter((x) => x.id !== id) },
+        `${K.YM.y(item.month)}年${K.YM.m(item.month)}月の雑費の内訳を削除：${item.name}`);
     }
 
     /**
@@ -381,7 +417,9 @@
     }
 
     replaceWithImport(imported, summary) {
-      const ok = this.commit({ ...imported, history: this.data.history, legacy: this.data.legacy, unrecordedSeen: {} }, `CSVから読み込んだ（${summary}）`);
+      // 雑費の内訳は残高の記録（CSVには入らない）に付くものなので、CSVに無ければ今の内訳を残す
+      const miscItems = imported.miscItems && imported.miscItems.length ? imported.miscItems : (this.data.miscItems || []);
+      const ok = this.commit({ ...imported, history: this.data.history, legacy: this.data.legacy, unrecordedSeen: {}, miscItems }, `CSVから読み込んだ（${summary}）`);
       if (ok) this.rememberNewUnrecordedMonths();
       return ok;
     }
@@ -407,17 +445,21 @@
   BudgetRepository.MAX_HISTORY = 500;
 
   // ===================================================================
-  // CSV（相談用と引き継ぎ用を兼ねる。Android版と同じ形式2）
+  // CSV（相談用と引き継ぎ用を兼ねる。Android版と同じ形式3。形式1・2も読める）
+  // 形式3：区分「出金（金額は都度）」＝枠（金額は空）、「支払カード」＝カードで払う定期のもの（口座は空）、
+  // 「請求の内訳」の行＝請求に入っている定期のもの（支払カードと日付で請求に結び付ける）、「雑費の内訳」の行＝その月（日付は月の1日）の雑費の内訳
   // ===================================================================
-  const HEADER = ['種類', '名前', '区分', '金額', '日付', '口座', '繰り返し', '最終日', '最終回の金額', '締め日', '支払日', '時点', '合計残高', '元の日付'];
-  const HEADER_V1 = HEADER.slice(0, -1);
+  const HEADER = ['種類', '名前', '区分', '金額', '日付', '口座', '繰り返し', '最終日', '最終回の金額', '締め日', '支払日', '時点', '合計残高', '元の日付', '支払カード', 'メモ'];
+  const HEADER_V2 = HEADER.slice(0, -2);
+  const HEADER_V1 = HEADER.slice(0, -3);
+  const SLOT_KIND = '出金（金額は都度）';
   const col = Object.fromEntries(HEADER.map((h, i) => [h, i]));
   const BOM = '﻿';
 
   class Bad extends Error { constructor(line, msg) { super(msg); this.line = line; } }
 
   const CsvFormat = {
-    FORMAT: 2, HEADER, BOM,
+    FORMAT: 3, HEADER, BOM, SLOT_KIND,
 
     duplicateNames(data) {
       const dups = (names) => [...new Set(names.filter((n, i) => names.indexOf(n) !== i))];
@@ -442,10 +484,10 @@
       }
       for (const c of data.cards) rec('カード', { 名前: c.name, 区分: c.retired ? '使わない' : '', 口座: accName.get(c.accountId), 締め日: c.closingDay, 支払日: c.paymentDay });
       for (const e of data.entries.slice().sort((a, b) => K.cmpStr(a.date, b.date))) {
-        let kindText = e.kind === INCOME ? '入金' : '出金';
+        let kindText = e.kind === INCOME ? '入金' : e.slot ? SLOT_KIND : '出金';
         if (e.chargeFrom) kindText = 'チャージ：' + (e.chargeFrom.startsWith('card:') ? cardName.get(e.chargeFrom.slice(5)) : accName.get(e.chargeFrom.slice(4)));
-        rec('予定', { 名前: e.name, 区分: kindText, 金額: e.amount, 日付: e.date, 口座: accName.get(e.accountId), 繰り返し: e.repeatMonthly ? K.everyLabel(K.repeatEvery(e)) : 'なし',
-          最終日: e.endDate, 最終回の金額: e.lastAmount });
+        rec('予定', { 名前: e.name, 区分: kindText, 金額: e.slot ? null : e.amount, 日付: e.date, 口座: accName.get(e.accountId), 繰り返し: e.repeatMonthly ? K.everyLabel(K.repeatEvery(e)) : 'なし',
+          最終日: e.endDate, 最終回の金額: e.lastAmount, 支払カード: e.cardId ? cardName.get(e.cardId) : null });
         if (e.repeatMonthly) for (const c of e.changes || []) {
           rec('変更', { 名前: e.name, 区分: c.skipped ? '飛ばす' : 'この回だけ', 金額: c.amount, 日付: c.date, 元の日付: c.originalDate });
         }
@@ -455,11 +497,15 @@
         const c = cardById.get(b.cardId);
         if (!c) continue;
         rec('請求', { 名前: c.name, 区分: '確定', 金額: b.amount, 日付: b.paymentDate, 口座: accName.get(b.accountId) ?? accName.get(c.accountId), 時点: b.inputDate, 最終日: b.payOn });
+        for (const x of b.items || []) rec('請求の内訳', { 名前: x.name, 金額: x.amount, 日付: b.paymentDate, 支払カード: c.name });
+      }
+      for (const m of (data.miscItems || []).slice().sort((a, b) => K.cmpStr(a.month, b.month))) {
+        rec('雑費の内訳', { 名前: m.name, 区分: m.rest ? '残り全部' : '', 金額: m.rest ? null : m.amount, 日付: m.month + '-01', メモ: m.memo });
       }
       for (const r of forecast) {
         rec('見通し', { 名前: r.occ.name, 区分: r.occ.kind === INCOME ? '入金' : '出金', 金額: r.occ.amount, 日付: r.occ.date, 口座: accName.get(r.occ.accountId), 合計残高: r.totalAfter });
       }
-      const textCols = new Set([col['名前'], col['口座']]);
+      const textCols = new Set([col['名前'], col['口座'], col['支払カード'], col['メモ']]);
       return BOM + rows.map((r, i) => r.map((v, j) => this.escape(i > 0 && textCols.has(j) ? this.guardFormula(v) : v)).join(',')).join('\r\n') + '\r\n';
     },
 
@@ -492,7 +538,7 @@
       if (!recs.length) return { error: true, line: 1, message: 'ファイルが空です' };
       const head = recs[0].r.map((x) => x.trim());
       const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
-      if (!same(head, HEADER) && !same(head, HEADER_V1)) {
+      if (!same(head, HEADER) && !same(head, HEADER_V2) && !same(head, HEADER_V1)) {
         return { error: true, line: recs[0].index + 1, message: '1行目の見出しが家計簿のCSVと違います。Excelで保存し直した場合は「CSV UTF-8（コンマ区切り）」で保存してください' };
       }
       try {
@@ -515,7 +561,7 @@
           return s;
         };
         const day = (line, r, name) => { const v = long(line, r, name); if (v < 1 || v > 31) throw new Bad(line, `「${name}」は1〜31で入れてください`); return v; };
-        const known = new Set(['情報', '口座', 'カード', '予定', '変更', '請求', '見通し']);
+        const known = new Set(['情報', '口座', 'カード', '予定', '変更', '請求', '見通し', '請求の内訳', '雑費の内訳']);
         for (const [line, r] of rows) if (!known.has(get(r, '種類'))) throw new Bad(line, `種類「${get(r, '種類')}」は読めません`);
         const of = (t) => rows.filter(([, r]) => get(r, '種類') === t);
         const dupCheck = (list, key, label) => {
@@ -540,17 +586,18 @@
         const entryRows = of('予定').map(([line, r]) => {
           const kt = get(r, '区分');
           let chargeFrom = null, kind;
+          const slot = kt === SLOT_KIND;
           if (kt === '入金') kind = INCOME;
-          else if (kt === '出金') kind = EXPENSE;
+          else if (kt === '出金' || slot) kind = EXPENSE;
           else if (kt.startsWith('チャージ：')) {
             const src = kt.slice(5);
             if (cardByName.has(src)) chargeFrom = 'card:' + cardByName.get(src);
             else if (accByName.has(src)) chargeFrom = 'acc:' + accByName.get(src);
             else throw new Bad(line, `チャージの払い元「${src}」がCSVの中にありません`);
             kind = INCOME;
-          } else throw new Bad(line, '予定の「区分」は「入金」「出金」「チャージ：払い元」のどれかにしてください');
-          const amount = long(line, r, '金額');
-          if (amount <= 0) throw new Bad(line, '「金額」は1円以上にしてください');
+          } else throw new Bad(line, `予定の「区分」は「入金」「出金」「${SLOT_KIND}」「チャージ：払い元」のどれかにしてください`);
+          const amount = slot ? 0 : long(line, r, '金額');
+          if (!slot && amount <= 0) throw new Bad(line, '「金額」は1円以上にしてください');
           const start = date(line, r, '日付');
           const rp = get(r, '繰り返し');
           // 毎月・2か月ごと・3か月ごと・半年ごと・毎年・Nか月ごと
@@ -562,8 +609,17 @@
           if (end != null && end < start) throw new Bad(line, '「最終日」が「日付」より前です');
           const last = repeat && end != null ? long(line, r, '最終回の金額', false) : null;
           if (last != null && last <= 0) throw new Bad(line, '「最終回の金額」は1円以上にしてください');
-          return [line, { id: newId(), name: text_(line, r, '名前'), amount, date: start, kind, accountId: accRef(line, r), repeatMonthly: repeat,
-            repeatEvery: repeat ? every : 1, endDate: end, lastAmount: last, chargeFrom, changes: [] }];
+          if (slot && !repeat) throw new Bad(line, `「${SLOT_KIND}」は繰り返しの予定にだけ使えます`);
+          // カードで払う定期のもの：口座は空、支払カードにカードの名前
+          const pc = this.unguard(get(r, '支払カード'));
+          let cardId = null;
+          if (pc) {
+            if (kind !== EXPENSE || chargeFrom) throw new Bad(line, '「支払カード」は出金の予定にだけ付けられます');
+            if (!cardByName.has(pc)) throw new Bad(line, `カード「${pc}」がCSVの中にありません`);
+            cardId = cardByName.get(pc);
+          }
+          return [line, { id: newId(), name: text_(line, r, '名前'), amount, date: start, kind, accountId: cardId ? '' : accRef(line, r), repeatMonthly: repeat,
+            repeatEvery: repeat ? every : 1, endDate: end, lastAmount: slot ? null : last, chargeFrom, changes: [], slot, cardId }];
         });
         const changesByIdx = new Map();
         for (const [line, r] of of('変更')) {
@@ -604,9 +660,33 @@
           if (seenBill.has(k)) throw new Bad(line, '同じカード・同じ支払日の請求が2つあります');
           seenBill.add(k);
         }
+        // 請求の内訳（支払カードと日付で請求に結び付け、名前でカードで払う定期のものに結び付ける）
+        const itemsByBill = new Map();
+        for (const [line, r] of of('請求の内訳')) {
+          const cn = text_(line, r, '支払カード');
+          if (!cardByName.has(cn)) throw new Bad(line, `カード「${cn}」がCSVの中にありません`);
+          const cardId = cardByName.get(cn);
+          const pay = date(line, r, '日付');
+          const bill = bills.map(([, b]) => b).find((b) => b.cardId === cardId && b.paymentDate === pay);
+          if (!bill) throw new Bad(line, `「請求の内訳」に当たる請求（${cn}・${pay}）がありません`);
+          const n = text_(line, r, '名前');
+          const amount = long(line, r, '金額');
+          if (amount < 0) throw new Bad(line, '「金額」は0円以上にしてください');
+          const en = entries.find((e) => e.cardId === cardId && e.name === n);
+          if (!itemsByBill.has(bill.id)) itemsByBill.set(bill.id, []);
+          itemsByBill.get(bill.id).push({ entryId: en ? en.id : '', name: n, amount });
+        }
+        // 雑費の内訳
+        const miscItems = of('雑費の内訳').map(([line, r]) => {
+          const rest = get(r, '区分') === '残り全部';
+          const amount = rest ? null : long(line, r, '金額', false);
+          if (amount != null && amount < 0) throw new Bad(line, '「金額」は0円以上にしてください');
+          return { id: newId(), month: D.ym(date(line, r, '日付')), name: text_(line, r, '名前'), amount, memo: this.unguard(get(r, 'メモ')), rest };
+        });
         const accs = accounts.map(([, a]) => a);
-        return { error: false, data: { ...emptyData(), accounts: accs, entries, cards: cards.map(([, c]) => c), bills: bills.map(([, b]) => b),
-          snapshots: accs.map((a) => ({ accountId: a.id, date: a.asOf, amount: a.balance })) } };
+        return { error: false, data: { ...emptyData(), accounts: accs, entries, cards: cards.map(([, c]) => c),
+          bills: bills.map(([, b]) => ({ ...b, items: itemsByBill.get(b.id) || [] })),
+          snapshots: accs.map((a) => ({ accountId: a.id, date: a.asOf, amount: a.balance })), miscItems } };
       } catch (e) {
         if (e instanceof Bad) return { error: true, line: e.line, message: e.message };
         throw e;

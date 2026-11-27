@@ -100,7 +100,22 @@ svg text { font-family: inherit; }
     return `<h3>${title}</h3><table><tr><th>項目</th><th style="width:28%"></th><th class="r">割合</th><th class="r">金額</th></tr>` +
       items.map((it) => { const pct = total > 0 ? Math.floor(it.amount * 100 / total) : 0;
         return `<tr><td>${esc(it.label)}</td><td><div class="bar" style="width:${(it.amount / max * 100).toFixed(1)}%"></div></td><td class="r">${pct === 0 && it.amount > 0 ? '1%未満' : pct + '%'}</td><td class="r">${num(it.amount)}</td></tr>`; }).join('') +
-      `<tr class="total"><td>合計</td><td></td><td class="r">100%</td><td class="r">${num(total)}</td></tr></table>`;
+      (() => { const sub = sum(items, (i) => i.amount); const pct = total > 0 ? Math.floor(sub * 100 / total) : 0;
+        return `<tr class="total"><td>計</td><td></td><td class="r">${pct}%</td><td class="r">${num(sub)}</td></tr></table>`; })();
+  }
+
+  /** 支出を固定費・変動費に分けた表と、雑費の内訳（計算には使わない目安）。 */
+  function expenseTables(data, b, from, to) {
+    const v = BreakdownLogic.miscRange(data, from, to);
+    let h = itemsTable('固定費', b.expenseItems.filter((i) => i.fixed), b.expense) + itemsTable('変動費', b.expenseItems.filter((i) => !i.fixed), b.expense);
+    const lines = [...K.groupBy(v.lines.filter((l) => l.amount != null || l.item.memo), (l) => l.item.name)];
+    if (v.misc > 0 || lines.length) {
+      h += `<h3>雑費の内訳（目安）</h3><table><tr><th>名前</th><th>メモ</th><th class="r">金額</th></tr>` +
+        lines.map(([n, l]) => `<tr><td>${esc(n)}</td><td class="note">${esc(l.map((x) => x.item.memo).filter(Boolean).join('、'))}</td><td class="r">${l.some((x) => x.amount != null) ? num(sum(l, (x) => x.amount || 0)) : ''}</td></tr>`).join('') +
+        `<tr class="total"><td>分かっている額／雑費</td><td></td><td class="r">${num(v.known)}／${num(v.misc)}</td></tr></table>` +
+        `<p class="note">雑費の内訳は、見積もりを含む目安です。残高や見通しの計算には使っていません。</p>`;
+    }
+    return h;
   }
 
   function flowTable(rows, accName, today) {
@@ -132,14 +147,15 @@ svg text { font-family: inherit; }
         `<tr class="total"><td>合計</td><td></td><td></td><td class="r">${num(sum(s.loans, (l) => l.remainingTotal))}</td><td></td></tr></table>`;
     }
     h += rec.length ? `<h3>定期の予定</h3><table><tr><th>名前</th><th>繰り返し</th><th>置き場所</th><th class="r">入金</th><th class="r">出金</th></tr>` +
-      rec.map((e) => `<tr><td>${esc(e.name)}</td><td>${esc(K.repeatLabel(e))}${e.endDate ? `<div class="note">${D.y(e.endDate)}/${D.m(e.endDate)}/${D.d(e.endDate)}まで</div>` : ''}</td><td>${esc(accName(e.accountId))}</td><td class="r">${e.kind === INCOME ? num(e.amount) : ''}</td><td class="r">${e.kind === INCOME ? '' : num(e.amount)}</td></tr>`).join('') + '</table>' : '<p class="note">定期の予定はありません。</p>';
+      rec.map((e) => `<tr><td>${esc(e.name)}</td><td>${esc(K.repeatLabel(e))}${e.endDate ? `<div class="note">${D.y(e.endDate)}/${D.m(e.endDate)}/${D.d(e.endDate)}まで</div>` : ''}</td><td>${esc(e.cardId ? 'カード：' + ((data.cards.find((c) => c.id === e.cardId) || {}).name || '削除したカード') : accName(e.accountId))}</td><td class="r">${e.kind === INCOME ? num(e.amount) : ''}</td><td class="r">${e.kind === INCOME ? '' : e.slot ? '都度' : num(e.amount)}</td></tr>`).join('') + '</table>' : '<p class="note">定期の予定はありません。</p>';
     const cards = data.cards.filter((c) => !c.retired);
     if (cards.length) h += `<h3>カード・後払い</h3><table><tr><th>名前</th><th>締め日・支払日</th><th>払う口座</th></tr>` +
       cards.map((c) => `<tr><td>${esc(c.name)}</td><td>${K.patternLabel(c)}</td><td>${esc(accName(c.accountId))}</td></tr>`).join('') + '</table>';
     h += `<h2>注記（計算の決まり）</h2><ul class="notes note">
 <li>確定した入出金（入力した記録・定期の予定・金額が確定したカードの請求）だけで計算しています。請求額が未確定のカードの引き落としは含みません。</li>
 <li>前月繰越は、残高を確かめた記録から逆算しています。月末の残高は、前月繰越 ＋ 収入 − 出金 です。</li>
-<li>「記録外の出金・入金」は、残高を確かめたときに、記録した入出金では説明できない差額です。いつ動いたかまでは分からないため、後で確かめた日の月に入れています。</li>
+<li>「雑費」「雑収入」は、残高を確かめたときに、記録した入出金では説明できない差額です（その月の合計がプラスなら雑費、マイナスなら雑収入）。いつ動いたかまでは分からないため、後で確かめた日の月に入れています。</li>
+<li>固定費は、繰り返しの支出と、カードの請求に入っている定期のもの（請求額を入れたときに確かめたもの）です。それ以外は変動費です。金額を入れていない支出（金額待ち）は含みません。</li>
 <li>預け入れ・引き出し・チャージ（お金の置き場所の移動）は、収入・出金に数えていません。カードからのチャージは、チャージ先で使った分を出金として数えます。</li>
 <li>銀行が休みの日（土日・祝日・12/31〜1/3）は、引き落としは次の営業日、入金は前の営業日として計算しています。現金・電子マネー・交通系ICは日付を調整しません。</li>
 <li>利息は計算していません。実際に請求された額を入れた分だけが数字に入ります。</li></ul>`;
@@ -164,8 +180,8 @@ svg text { font-family: inherit; }
 <div class="kpi"><div class="l">収入</div><div class="v">${yen(p.income)}</div><div class="s">前月比 ${signed(p.income - prev.income)}</div></div>
 <div class="kpi"><div class="l">出金</div><div class="v">${yen(p.expense)}</div><div class="s">前月比 ${signed(p.expense - prev.expense)}</div></div>
 <div class="kpi main"><div class="l">${label}</div><div class="v"${neg(p.end)}>${yen(p.end)}</div><div class="s">前月末から ${signed(p.end - p.start)}</div></div></div>
-<h2>計算の式</h2><table><tr><td>前月繰越</td><td class="r">${num(p.start)}</td></tr><tr><td>＋ 収入${p.unrecorded < 0 ? `（うち記録外 ${num(-p.unrecorded)}）` : ''}</td><td class="r">${num(p.income)}</td></tr>
-<tr><td>− 出金${p.unrecorded > 0 ? `（うち記録外 ${num(p.unrecorded)}）` : ''}</td><td class="r">${num(p.expense)}</td></tr>
+<h2>計算の式</h2><table><tr><td>前月繰越</td><td class="r">${num(p.start)}</td></tr><tr><td>＋ 収入${p.unrecorded < 0 ? `（うち雑収入 ${num(-p.unrecorded)}）` : ''}</td><td class="r">${num(p.income)}</td></tr>
+<tr><td>− 出金${p.unrecorded > 0 ? `（うち雑費 ${num(p.unrecorded)}）` : ''}</td><td class="r">${num(p.expense)}</td></tr>
 ${p.cardCharge > 0 ? `<tr><td>＋ カードからのチャージ（請求は翌月以降）</td><td class="r">${num(p.cardCharge)}</td></tr>` : ''}${p.cardCharge < 0 ? `<tr><td>− 以前のカードチャージ分の請求</td><td class="r">${num(-p.cardCharge)}</td></tr>` : ''}
 <tr class="total"><td>＝ ${label}</td><td class="r"${neg(p.end)}>${num(p.end)}</td></tr></table>
 ${p.beforeFirstBalance ? '<p class="note">最初に残高を入れた日より前の月です。前月繰越は、記録した入出金から逆算した参考値です。</p>' : ''}
@@ -177,7 +193,7 @@ ${foot(title, 1, total, made)}</section>`;
     const p2 = `<section class="page"><h2>${YM.m(month)}月の収支の内訳</h2>
 <div class="kpis"><div class="kpi"><div class="l">収入</div><div class="v">${yen(b.income)}</div></div><div class="kpi"><div class="l">支出</div><div class="v">${yen(b.expense)}</div></div>
 <div class="kpi main"><div class="l">収支</div><div class="v"${neg(b.net)}>${signed(b.net)}</div></div><div class="kpi"><div class="l">うち明日以降の予定</div><div class="s">収入 ${yen(b.scheduledIncome)}<br>支出 ${yen(b.scheduledExpense)}</div></div></div>
-${itemsTable('支出の内訳', b.expenseItems, b.expense)}${itemsTable('収入の内訳', b.incomeItems, b.income)}
+${expenseTables(data, b, f, t)}${itemsTable('収入の内訳', b.incomeItems, b.income)}
 <h3>${YM.m(month)}月の入出金</h3>${flowTable(p.rows, accName, today)}
 ${foot(title, 2, total, made)}</section>`;
     const p3 = `<section class="page">${forecastPage(data, month, today, 12)}${foot(title, 3, total, made)}</section>`;
@@ -206,8 +222,8 @@ ${plans.some((p) => p.beforeFirstBalance) ? '<p class="note">最初に残高を�
       plans.map((p) => `<tr><td>${YM.m(p.month)}月${p.kind === 'PAST' ? '' : '<span class="note">（見込み）</span>'}</td><td class="r">${num(p.income)}</td><td class="r">${num(p.expense)}</td><td class="r"${neg(p.end - p.start)}>${signed(p.end - p.start).replace('円', '')}</td><td class="r"${neg(p.end)}><b>${num(p.end)}</b></td></tr>`).join('') +
       `<tr class="total"><td>合計</td><td class="r">${num(inc)}</td><td class="r">${num(exp)}</td><td class="r"${neg(inc - exp)}>${signed(plans[11].end - plans[0].start).replace('円', '')}</td><td></td></tr></table>
 ${foot(title, 1, total, made)}</section>`;
-    const p2 = `<section class="page"><h2>${year}年の収支の内訳</h2>${itemsTable('支出の内訳', b.expenseItems, b.expense)}${itemsTable('収入の内訳', b.incomeItems, b.income)}
-<p class="note">内訳は記録した入出金と記録外の差から集計しています。1ページ目の収入・出金とは、カードからのチャージの扱いなどで少し違うことがあります。</p>${foot(title, 2, total, made)}</section>`;
+    const p2 = `<section class="page"><h2>${year}年の収支の内訳</h2>${expenseTables(data, b, f, t)}${itemsTable('収入の内訳', b.incomeItems, b.income)}
+<p class="note">内訳は記録した入出金と、残高の差（雑費・雑収入）から集計しています。1ページ目の収入・出金とは、カードからのチャージの扱いなどで少し違うことがあります。</p>${foot(title, 2, total, made)}</section>`;
     const curYm = D.ym(today);
     const p3 = `<section class="page">${forecastPage(data, curYm > YM.of(year, 12) ? YM.of(year, 1) : curYm < YM.of(year, 1) ? YM.of(year, 1) : curYm, today, 12)}${foot(title, 3, total, made)}</section>`;
     const p4 = `<section class="page">${loansAndNotes(data, today, accName)}${foot(title, 4, total, made)}</section>`;

@@ -251,8 +251,11 @@
 
     amountOn(e, raw, last) { return e.lastAmount != null && raw === last ? e.lastAmount : e.amount; },
 
-    /** noShift=true（財布の現金など）は、銀行の休みで日付をずらさない。 */
-    expand(e, from, to, noShift = false) {
+    /**
+     * noShift=true（財布の現金など）は、銀行の休みで日付をずらさない。
+     * 枠（slot）の、金額を入れていない回は作らない（withPending=true なら pending の印を付けて作る）。
+     */
+    expand(e, from, to, noShift = false, withPending = false) {
       const last = this.lastRawDate(e);
       const ch = new Map();
       if (e.repeatMonthly) for (const c of e.changes || []) ch.set(c.originalDate, c);
@@ -263,11 +266,13 @@
         const c = ch.get(d);
         if (c && c.skipped) continue;
         const day = (c && c.date) || d;
+        const amount = c && c.amount != null ? c.amount : e.slot ? null : this.amountOn(e, d, last);
+        if (amount == null && !withPending) continue;
         out.push({
           entryId: e.id, name: e.name,
-          amount: c && c.amount != null ? c.amount : this.amountOn(e, d, last),
+          amount: amount == null ? 0 : amount,
           date: noShift ? day : this.adjust(day, e.kind),
-          originalDate: d, kind: e.kind, accountId: e.accountId, changed: !!c,
+          originalDate: d, kind: e.kind, accountId: e.accountId, changed: !!c && (!e.slot || !!c.date), pending: amount == null,
         });
       }
       return out.filter((o) => o.date >= from && o.date <= to);
@@ -292,7 +297,7 @@
     },
 
     loans(data, today) {
-      return data.entries.filter((e) => e.kind === EXPENSE && e.repeatMonthly && e.endDate != null)
+      return data.entries.filter((e) => e.kind === EXPENSE && e.repeatMonthly && e.endDate != null && !e.cardId && !e.slot)
         .map((e) => {
           let far = e.endDate;
           for (const c of e.changes || []) if (c.date) far = D.max(far, c.date);
@@ -381,16 +386,17 @@
       transfers.sort((a, b) => cmpStr(a.deadline, b.deadline));
 
       const thisMonth = D.ym(today);
-      // 今月の定期の支払い（毎月のもの＋今月に回が来る、毎月以外のもの）
-      const monthlyFixed = sum(data.entries.filter((e) => e.kind === EXPENSE && e.repeatMonthly &&
-        D.ym(e.date) <= thisMonth && (e.endDate == null || D.ym(e.endDate) >= thisMonth) &&
-        (repeatEvery(e) === 1 || this.expand(e, YM.atDay(thisMonth, 1), YM.atEnd(thisMonth), true).length > 0)), (e) => e.amount);
+      // 今月の固定費：口座から払う繰り返しの支出の、今月の回（予定の日付で数える。枠は金額を入れた回だけ）。カードで払うものは請求に入るので数えない
+      const monthlyFixed = sum(data.entries.filter((e) => e.kind === EXPENSE && e.repeatMonthly && e.chargeFrom == null && !e.cardId),
+        (e) => sum(this.expand(e, D.plusDays(YM.atDay(thisMonth, 1), -10), D.plusDays(YM.atEnd(thisMonth), 10), true)
+          .filter((o) => D.ym(o.originalDate) === thisMonth), (o) => o.amount));
 
       return {
         totalBalance: start, currentByAccount: current, recordedBalance: recorded, passedSinceUpdate: passed,
         oldestAsOf: oldest, endDate: to, nextIncomeDate: nextIncome, usableUntilNextIncome: start - spend,
         lowestTotal: lowest, lowestDate, timeline: rows, months: monthRows, transfers,
         loans: this.loans(data, today), monthlyFixed, unconfirmedBills: CardLogic.unconfirmed(data, today),
+        pendingSlots: SlotLogic.pending(data, to),
       };
     },
 
@@ -502,12 +508,24 @@
           .map((p) => ({ card, paymentRaw: p, date: this.payDay(p), closing: this.closingFor(card, p) })))
         .sort((a, b) => cmpStr(a.date, b.date));
     },
-    /** 請求を確定する（同じカード・同じ支払日の確定は置き換える）。payOn＝引き落とせず別の日に払う日（無ければ null）。 */
-    setBill(data, card, paymentRaw, amount, today, id, payOn = null) {
+    /** 請求を確定する（同じカード・同じ支払日の確定は置き換える）。payOn＝引き落とせず別の日に払う日（無ければ null）。items=null なら内訳はそのまま。 */
+    setBill(data, card, paymentRaw, amount, today, id, payOn = null, items = null) {
       const old = this.confirmedBill(data, card, paymentRaw);
       return { ...data, bills: [...data.bills.filter((b) => !(b.cardId === card.id && b.paymentDate === paymentRaw)),
-        { id, cardId: card.id, paymentDate: paymentRaw, amount, inputDate: old ? old.inputDate : today, accountId: old ? old.accountId : card.accountId, payOn: payOn || null }] };
+        { id, cardId: card.id, paymentDate: paymentRaw, amount, inputDate: old ? old.inputDate : today, accountId: old ? old.accountId : card.accountId, payOn: payOn || null,
+          items: items || (old && old.items) || [] }] };
     },
+    /**
+     * その請求に入っていそうな、カードで払う定期のもの（利用日がこの請求の締めの期間にある回）。
+     * 締め日から推した候補にすぎないので、画面で本人が確かめたものだけを内訳にする。枠の金額待ちの回も含む（pending）。
+     */
+    billCandidates(data, card, paymentRaw) {
+      return data.entries.filter((e) => e.cardId === card.id && e.kind === EXPENSE)
+        .flatMap((e) => BudgetCalculator.expand(e, D.plusDays(paymentRaw, -75), paymentRaw, true, true))
+        .filter((o) => this.paymentForUse(card, o.date) === paymentRaw).sort((a, b) => cmpStr(a.date, b.date));
+    },
+    /** 請求の内訳（定期のもの）の合計。請求額を超える分は数えない。 */
+    itemsTotal(b) { return Math.min(sum(b.items || [], (x) => x.amount), b.amount); },
     deleteBill(data, card, paymentRaw) {
       return { ...data, bills: data.bills.filter((b) => !(b.cardId === card.id && b.paymentDate === paymentRaw)) };
     },
@@ -624,8 +642,9 @@
   // 内訳（振り返り）と記録外の出入り
   // ===================================================================
   const BreakdownLogic = {
-    UNRECORDED_OUT: '記録外の出金',
-    UNRECORDED_IN: '記録外の入金',
+    /** 記録外の出入りの表示名（計算は同じ。その月の合計がプラスなら雑費、マイナスなら雑収入）。 */
+    MISC: '雑費',
+    MISC_IN: '雑収入',
 
     monthRange(m) { return [YM.atDay(m, 1), YM.atEnd(m)]; },
     yearRange(y) { return [D.of(y, 1, 1), D.of(y, 12, 31)]; },
@@ -664,38 +683,65 @@
       const isCharge = (o) => o.entryId.startsWith('chg:') || (entryById.has(o.entryId) && entryById.get(o.entryId).chargeFrom != null);
       const incomes = occs.filter((o) => o.kind === INCOME && !isCharge(o));
       const expenses = occs.filter((o) => o.kind === EXPENSE && !isCharge(o));
-      const incomeItems = [...groupBy(incomes, (o) => o.name)].map(([name, l]) => ({ label: name, amount: sum(l, (o) => o.amount), details: l, note: null }));
-      const groups = groupBy(expenses, (o) => {
-        if (o.entryId.startsWith('bill:')) { const c = cardById.get(o.entryId.split(':')[1]); return 'カード：' + (c ? c.name : '（削除したカード）'); }
-        const e = entryById.get(o.entryId);
-        return e && e.repeatMonthly ? '定期の引き落とし' : '1回限りの引き落とし';
-      });
-      const expenseItems = [...groups].map(([label, l]) => {
-        const charged = sum(l.filter((o) => o.entryId.startsWith('bill:')), (o) => this.chargesInBill(data, o));
-        const amount = Math.max(0, sum(l, (o) => o.amount) - charged);
-        return { label, amount, details: l.slice().sort((a, b) => cmpStr(a.date, b.date)),
-          note: charged > 0 ? `請求のうちチャージ ${charged}円は、電子マネー・交通系ICで使った分として数えるため、ここでは差し引いています` : null };
-      }).filter((it) => it.amount > 0 || it.details.length);
+      const incomeItems = [...groupBy(incomes, (o) => o.name)].map(([name, l]) => ({ label: name, amount: sum(l, (o) => o.amount), details: l, note: null, fixed: false }));
+      const expenseItems = [];
+      const isBill = (o) => o.entryId.startsWith('bill:');
+      const byDate = (l) => l.slice().sort((a, b) => cmpStr(a.date, b.date));
+      // 口座から払う繰り返し（固定費）と、1回限り（変動費）
+      const rec = expenses.filter((o) => !isBill(o) && entryById.has(o.entryId) && entryById.get(o.entryId).repeatMonthly);
+      if (rec.length) expenseItems.push({ label: '定期の支出', amount: sum(rec, (o) => o.amount), details: byDate(rec), note: null, fixed: true });
+      const once = expenses.filter((o) => !isBill(o) && !(entryById.has(o.entryId) && entryById.get(o.entryId).repeatMonthly));
+      if (once.length) expenseItems.push({ label: '1回限りの支出', amount: sum(once, (o) => o.amount), details: byDate(once), note: null, fixed: false });
+      // カードの請求：本人が確かめた定期のもの（固定費）と、残りの中身の分からない分（変動費）に分ける
+      const billOf = (o) => data.bills.find((b) => `bill:${b.cardId}:${b.paymentDate}` === o.entryId) || null;
+      for (const [cardName, l] of groupBy(expenses.filter(isBill), (o) => { const c = cardById.get(o.entryId.split(':')[1]); return c ? c.name : '（削除したカード）'; })) {
+        const label = 'カード：' + cardName;
+        // カードの請求に入っているチャージ分は差し引く（二重に数えない）
+        const charged = sum(l, (o) => this.chargesInBill(data, o));
+        const total = Math.max(0, sum(l, (o) => o.amount) - charged);
+        const bills = l.map(billOf).filter(Boolean);
+        const items = bills.flatMap((b) => b.items || []);
+        const fixedPart = Math.min(sum(bills, (b) => CardLogic.itemsTotal(b)), total);
+        if (fixedPart > 0) {
+          const names = [...groupBy(items, (x) => x.name)].map(([n, xs]) => `${n} ${sum(xs, (x) => x.amount)}円`).join('、');
+          expenseItems.push({ label: `${label}（定期のもの）`, amount: fixedPart, details: byDate(l),
+            note: `請求額を入れたときに確かめた、カードで払う定期のものです：${names}`, fixed: true });
+        }
+        const notes = [
+          charged > 0 ? `請求のうちチャージ ${charged}円は、電子マネー・交通系ICで使った分として数えるため、ここでは差し引いています` : null,
+          fixedPart > 0 ? `定期のもの ${fixedPart}円を除いた、中身の分からない分です` : null,
+        ].filter(Boolean);
+        if (total - fixedPart > 0 || fixedPart === 0)
+          expenseItems.push({ label, amount: total - fixedPart, details: byDate(l), note: notes.length ? notes.join('。') : null, fixed: false });
+      }
+      for (let i = expenseItems.length - 1; i >= 0; i--) if (expenseItems[i].amount <= 0 && !expenseItems[i].details.length) expenseItems.splice(i, 1);
 
+      // 雑費・雑収入：記録外の出入りを月ごとに合計し、プラスの月は雑費、マイナスの月は雑収入（計算は記録外の出入りのまま）
       const accName = new Map(data.accounts.map((a) => [a.id, a.name]));
       const inRange = this.gaps(data).filter((g) => { const m = D.ym(g.to); return YM.atEnd(m) >= from && YM.atDay(m, 1) <= to; });
       const md = (x) => `${D.m(x)}/${D.d(x)}`;
-      for (const [accId, l] of groupBy(inRange, (g) => g.accountId)) {
-        const s = sum(l, (g) => g.diff);
-        if (s === 0) continue;
-        const name = accName.get(accId) || '削除した口座';
-        const spans = l.map((g) => `${md(g.from)}〜${md(g.to)}`).join('、');
+      const byMonth = new Map();
+      for (const g of inRange) { const k = D.ym(g.to); byMonth.set(k, (byMonth.get(k) || 0) + g.diff); }
+      const noteFor = (months) => {
+        const l = inRange.filter((g) => months.includes(D.ym(g.to)));
+        const places = [...groupBy(l, (g) => g.accountId)].map(([id, gs]) => {
+          const t = sum(gs, (g) => g.diff);
+          return `${accName.get(id) || '削除した口座'}（${gs.map((g) => `${md(g.from)}〜${md(g.to)}`).join('、')}）：` + (t >= 0 ? `記録より${t}円少ない` : `記録より${-t}円多い`);
+        }).join('\n');
         const crosses = l.some((g) => D.ym(g.from) !== D.ym(g.to));
-        const note = `${name}の残高を確かめた日の間（${spans}）の差です。いつ動いたかまでは分かりません` +
-          (crosses ? '。月をまたぐ差は、後で確かめた日の月に入れています' : '');
-        if (s > 0) expenseItems.push({ label: `${this.UNRECORDED_OUT}：${name}`, amount: s, details: [], note });
-        else incomeItems.push({ label: `${this.UNRECORDED_IN}：${name}`, amount: -s, details: [], note });
-      }
+        return '残高を確かめた日の間で、記録した入出金では説明できない差です。いつ動いたかまでは分からないため、後で確かめた日の月に入れています' +
+          (crosses ? '（月をまたぐ差を含みます）' : '') + '。\n' + places;
+      };
+      const outMonths = [...byMonth].filter(([, v]) => v > 0).map(([k]) => k);
+      const inMonths = [...byMonth].filter(([, v]) => v < 0).map(([k]) => k);
+      if (outMonths.length) expenseItems.push({ label: this.MISC, amount: sum(outMonths, (k) => byMonth.get(k)), details: [], note: noteFor(outMonths), fixed: false });
+      if (inMonths.length) incomeItems.push({ label: this.MISC_IN, amount: -sum(inMonths, (k) => byMonth.get(k)), details: [], note: noteFor(inMonths), fixed: false });
       const byAmountDesc = (a, b) => b.amount - a.amount;
       const income = sum(incomeItems, (i) => i.amount);
       const expense = sum(expenseItems, (i) => i.amount);
+      const fixedExpense = sum(expenseItems.filter((i) => i.fixed), (i) => i.amount);
       return {
-        from, to, income, expense, net: income - expense,
+        from, to, income, expense, net: income - expense, fixedExpense, variableExpense: expense - fixedExpense,
         incomeItems: incomeItems.sort(byAmountDesc), expenseItems: expenseItems.sort(byAmountDesc),
         scheduledIncome: sum(incomes.filter((o) => o.date > today), (o) => o.amount),
         scheduledExpense: sum(expenses.filter((o) => o.date > today), (o) => o.amount),
@@ -723,8 +769,55 @@
     },
 
     currentSeen(data) { return Object.fromEntries(this.unrecordedByMonth(data)); },
+
+    // ---- 雑費の内訳（計算には使わない。内訳の画面の表示だけ） ----
+
+    /** ある月の雑費と、その内訳（lines：{item, amount}。「残り全部」は計算した額、メモだけの行は null）。unknown がマイナスなら内訳が雑費より多い。 */
+    miscMonth(data, month, unrecorded = this.unrecordedByMonth(data)) {
+      const misc = Math.max(0, unrecorded.get(month) || 0);
+      const items = (data.miscItems || []).filter((x) => x.month === month);
+      const fixedSum = sum(items.filter((x) => !x.rest), (x) => x.amount || 0);
+      const lines = items.map((x) => ({ item: x, amount: x.rest ? Math.max(0, misc - fixedSum) : x.amount == null ? null : x.amount }));
+      const known = sum(lines, (l) => l.amount || 0);
+      return { misc, lines, known, unknown: misc - known };
+    },
+
+    /** 期間（月・年）の雑費の内訳をまとめたもの（年の画面用）。 */
+    miscRange(data, from, to) {
+      const unrecorded = this.unrecordedByMonth(data);
+      const views = [];
+      for (let m = D.ym(from); m <= D.ym(to); m = YM.plus(m, 1)) views.push(this.miscMonth(data, m, unrecorded));
+      const misc = sum(views, (v) => v.misc), known = sum(views, (v) => v.known);
+      return { misc, lines: views.flatMap((v) => v.lines), known, unknown: misc - known };
+    },
+  };
+
+  // ===================================================================
+  // 枠：金額は毎回ちがい、確定したら入れる繰り返し（水道・電気・通信費など）。Android版 domain/Slots.kt と同じ
+  // ===================================================================
+  const SlotLogic = {
+    /** 口座から払う枠の、金額待ちの回（始まりの日から to まで、日付順）。カードで払う枠は、請求の画面で金額を入れる。 */
+    pending(data, to) {
+      const accs = new Map(data.accounts.map((a) => [a.id, a]));
+      return data.entries.filter((e) => e.slot && !e.cardId && accs.has(e.accountId))
+        .flatMap((e) => BudgetCalculator.expand(e, e.date, to, noBankDays(accs.get(e.accountId)), true).filter((o) => o.pending))
+        .sort((a, b) => cmpStr(a.date, b.date) || cmpStr(a.name, b.name));
+    },
+    /** 日付を過ぎた（今日までの）金額待ち。ホームで知らせる。 */
+    overdue(data, today) { return this.pending(data, today); },
+    /** 参考に出す前回の金額（計算には使わない）。口座払いは before より前の「この回だけ」の金額、カード払いは before より前の請求の内訳から。 */
+    previousAmount(data, e, before) {
+      if (e.cardId) {
+        const bills = data.bills.filter((b) => b.cardId === e.cardId && b.paymentDate < before).sort((a, b) => cmpStr(b.paymentDate, a.paymentDate));
+        for (const b of bills) { const x = (b.items || []).find((i) => i.entryId === e.id); if (x) return x.amount; }
+        return null;
+      }
+      let best = null;
+      for (const c of e.changes || []) if (!c.skipped && c.amount != null && c.originalDate < before && (!best || c.originalDate > best.originalDate)) best = c;
+      return best ? best.amount : null;
+    },
   };
 
   Object.assign(K, { D, YM, INCOME, EXPENSE, sum, cmpStr, groupBy, noBankDays, isPrepaid, kindLabel,
-    CHECK, CheckOrder, CardPresets, patternLabel, repeatEvery, REPEAT_CHOICES, everyLabel, repeatLabel, JapaneseHolidays, BudgetCalculator, CardLogic, MonthlyLogic, BreakdownLogic });
+    CHECK, CheckOrder, CardPresets, patternLabel, repeatEvery, REPEAT_CHOICES, everyLabel, repeatLabel, JapaneseHolidays, BudgetCalculator, CardLogic, MonthlyLogic, BreakdownLogic, SlotLogic });
 })(window.K = window.K || {});

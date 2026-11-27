@@ -520,10 +520,13 @@
      * 締め日から推した候補にすぎないので、画面で本人が確かめたものだけを内訳にする。枠の金額待ちの回も含む（pending）。
      */
     billCandidates(data, card, paymentRaw) {
+      // カードで払う予定の日付はカードの支払日に合わせてあるので、請求の支払日と同じ月の回をその請求の中身とする（締め日・利用日は見ない）
+      const ym = D.ym(paymentRaw);
       return data.entries.filter((e) => e.cardId === card.id && e.kind === EXPENSE)
-        .flatMap((e) => BudgetCalculator.expand(e, D.plusDays(paymentRaw, -75), paymentRaw, true, true))
-        .filter((o) => this.paymentForUse(card, o.date) === paymentRaw).sort((a, b) => cmpStr(a.date, b.date));
+        .flatMap((e) => BudgetCalculator.expand(e, YM.atDay(ym, 1), YM.atEnd(ym), true, true)).sort((a, b) => cmpStr(a.date, b.date));
     },
+    /** カードで払う予定の日付を、その月のカードの支払日にそろえる。 */
+    alignToPayment(card, date) { return this.dayIn(D.ym(date), card.paymentDay); },
     /**
      * その請求に入っている定期のもの（内訳の画面の中身）。登録してあるカード払いの定期の予定から自動で出す。
      * 請求額を入れる画面でチェックを外したもの（内訳を保存した請求で、内訳に無いもの）は外す。

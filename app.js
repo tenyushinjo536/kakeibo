@@ -6,7 +6,7 @@
   'use strict';
   const { D, YM, INCOME, EXPENSE, sum, BudgetCalculator: BC, CardLogic, MonthlyLogic, BreakdownLogic, CheckOrder, SlotLogic,
     BudgetStore, BudgetRepository, CsvFormat, newId, noBankDays, isPrepaid, kindLabel } = K;
-  const APP_VERSION = '0.26.2';
+  const APP_VERSION = '0.26.3';
   const PLATFORM = 'iPhone版';
 
   const repo = new BudgetRepository(BudgetStore);
@@ -1179,7 +1179,9 @@
     draw();
     return box;
   }
-  const CARD_PAY_NOTE = 'カードで払うものは、カードの請求でまとめて引かれるので、残高の計算には入れません。請求額を入れるときに、内訳（固定費）として確かめます。金額が毎回ちがうものは、日付を過ぎるとホームの「金額を入れていない支出」に出るので、そこで入れます。';
+  /** カードで払う予定の日付は、その月のカードの支払日にそろえる（同じ月の請求の中身になる）。 */
+  const alignCard = (cardId, d) => { const c = cardId ? repo.data.cards.find((x) => x.id === cardId) : null; return c ? CardLogic.alignToPayment(c, d) : d; };
+  const CARD_PAY_NOTE = 'カードで払うものは、カードの請求でまとめて引かれるので、残高の計算には入れません。日付はカードの支払日に合わせ、同じ月に引き落とされる請求の内訳（固定費）になります。金額が毎回ちがうものは、日付を過ぎるとホームの「金額を入れていない支出」に出るので、そこで入れます。';
 
   /** 口座を選ぶチップの列。 */
   function accountChips(accounts, selected, onPick) {
@@ -1509,7 +1511,7 @@
     const cardNote = txt(CARD_PAY_NOTE, 'note');
     const onPay = () => {
       db.refresh();
-      dateLabel.textContent = pay.cardId ? 'カードで払う日（繰り返す場合は初回）' : '引き落とし日';
+      dateLabel.textContent = pay.cardId ? '最初に引き落とされる月（日はカードの支払日になります）' : '引き落とし日';
       cardNote.style.display = pay.cardId ? '' : 'none';
     };
     body.append(amountLabel, amount, dateLabel, db.view, label('支払元'), payChips(accounts, pay, () => true, onPay), cardNote, label('名前'), name);
@@ -1523,7 +1525,7 @@
         if (!slot && (v == null || v <= 0)) { toast('金額を入力してください'); return false; }
         if (!D.valid(dd)) { toast('日付を選んでください'); return false; }
         if (pay.cardId && !rs.repeating()) { toast('カードで払うものは、繰り返しの予定として登録してください（1回の買い物はカードの請求額に含まれます）'); return false; }
-        const ne = rs.apply({ id: e ? e.id : newId(), name: n, amount: slot ? 0 : v, date: dd, kind: EXPENSE, accountId: pay.cardId ? '' : pay.accountId, repeatMonthly: false, endDate: null, lastAmount: null,
+        const ne = rs.apply({ id: e ? e.id : newId(), name: n, amount: slot ? 0 : v, date: alignCard(pay.cardId, dd), kind: EXPENSE, accountId: pay.cardId ? '' : pay.accountId, repeatMonthly: false, endDate: null, lastAmount: null,
           chargeFrom: null, changes: e ? e.changes || [] : [], cardId: pay.cardId || null });
         return ne ? saveOrReplace(ne, !e, '引き落とし：', close) : false;
       } });
@@ -2125,7 +2127,7 @@
         if (!D.valid(date)) { toast('日付を選んでください'); return false; }
         if (cardId && !rs.repeating()) { toast('カードで払うものは、繰り返しの予定として登録してください（1回の買い物はカードの請求額に含まれます）'); return false; }
         // 振替の払い元と「この回だけ」の変更は引き継ぐ（編集で消さない）
-        const applied = rs.apply({ id: e ? e.id : newId(), name: n, amount: slot ? 0 : v, date, kind, accountId: cardId ? '' : pay.accountId, repeatMonthly: false, endDate: null, lastAmount: null,
+        const applied = rs.apply({ id: e ? e.id : newId(), name: n, amount: slot ? 0 : v, date: alignCard(cardId, date), kind, accountId: cardId ? '' : pay.accountId, repeatMonthly: false, endDate: null, lastAmount: null,
           chargeFrom: e ? e.chargeFrom : null, changes: e ? e.changes || [] : [], cardId: cardId || null });
         if (!applied) return false;
         const ne = { ...applied, slot: !!applied.slot && kind === EXPENSE };
